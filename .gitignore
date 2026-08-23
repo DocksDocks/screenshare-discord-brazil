@@ -1,0 +1,8 @@
+node_modules/
+dist/
+dist-electron/
+release/
+coverage/
+vendor/tor/
+vendor/*.tar.gz
+*.log

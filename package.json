@@ -1,0 +1,96 @@
+{
+  "name": "golivebypass-safe",
+  "productName": "GoLiveBypass Safe",
+  "version": "0.1.0",
+  "description": "Windows-only, Tor-only GoLiveBypass fork with reversible installation",
+  "author": "GoLiveBypass Safe contributors",
+  "license": "GPL-3.0-only",
+  "private": true,
+  "type": "module",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "npm run compile && electron .",
+    "prepare:tor": "node scripts/prepare-tor.mjs",
+    "probe:tor": "node scripts/probe-tor.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "compile:electron": "tsc -p tsconfig.electron.json",
+    "compile": "npm run typecheck && npm run compile:electron && vite build",
+    "test": "vitest run",
+    "verify": "npm run typecheck && npm test",
+    "build:win": "npm run prepare:tor && npm run compile && electron-builder --win portable --x64 --publish never"
+  },
+  "build": {
+    "appId": "br.com.golivebypass.safe",
+    "productName": "GoLiveBypass Safe",
+    "asar": true,
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "runtime",
+        "to": "runtime",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "vendor/tor",
+        "to": "runtime/tor",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "vendor/tor-manifest.json",
+        "to": "runtime/tor-manifest.json"
+      },
+      {
+        "from": "LICENSE",
+        "to": "LICENSE"
+      },
+      {
+        "from": "THIRD_PARTY_NOTICES.md",
+        "to": "THIRD_PARTY_NOTICES.md"
+      }
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "electronFuses": {
+      "runAsNode": false,
+      "enableCookieEncryption": true,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true,
+      "loadBrowserProcessSpecificV8Snapshot": false,
+      "grantFileProtocolExtraPrivileges": true
+    },
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "GoLiveBypass-Safe-${version}.${ext}"
+    }
+  },
+  "devDependencies": {
+    "@electron/fuses": "2.1.3",
+    "@types/node": "24.13.3",
+    "electron": "43.4.1",
+    "electron-builder": "26.15.3",
+    "typescript": "7.0.2",
+    "vite": "8.2.2",
+    "vitest": "4.1.11"
+  },
+  "allowScripts": {
+    "electron@43.4.1": true
+  }
+}

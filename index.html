@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GoLiveBypass Safe</title>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="masthead">
+        <div>
+          <p class="eyebrow">ROTA LOCAL / WINDOWS</p>
+          <h1>GoLive<span>Bypass</span></h1>
+        </div>
+        <div class="shield" aria-label="Modo seguro">SAFE<br />MODE</div>
+      </header>
+
+      <section class="hero">
+        <div>
+          <p class="kicker">Gateway via Tor. Midia direta.</p>
+          <h2>Uma rota estreita,<br />sem proxy aleatorio.</h2>
+        </div>
+        <p class="hero-copy">
+          Somente hosts <code>*.discord.gg</code> usam o Tor embutido. O payload nao le token,
+          cookies, conta ou transmissao. Se a rota falhar, o gateway nao cai para o IP real.
+        </p>
+      </section>
+
+      <section class="status-panel" aria-labelledby="status-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">ESTADO DO CLIENTE</p>
+            <h3 id="status-title">Instalacoes encontradas</h3>
+          </div>
+          <button id="refresh" class="text-button" type="button">Atualizar leitura</button>
+        </div>
+        <div id="channels" class="channels" aria-live="polite"></div>
+        <p id="message" class="message" role="status"></p>
+      </section>
+
+      <section class="actions" aria-label="Acoes">
+        <button id="install" class="primary" type="button">
+          <span>01</span>
+          Instalar com backup
+        </button>
+        <button id="repair" type="button">
+          <span>02</span>
+          Reparar apos update
+        </button>
+        <button id="uninstall" class="danger" type="button">
+          <span>03</span>
+          Restaurar original
+        </button>
+      </section>
+
+      <footer>
+        <p>
+          GPLv3, sem garantia. <button id="license" class="license-button" type="button">Ler licenca</button><br />
+          Sem atualizador automatico. Sem lista publica de proxies. Sem sobrescrever Vencord ou Equicord.
+        </p>
+        <p class="warning">
+          Modificar o cliente pode violar os Termos do Discord e nao elimina risco regulatorio ou de conta.
+        </p>
+      </footer>
+    </main>
+
+    <dialog id="license-dialog">
+      <div class="dialog-heading">
+        <strong>GNU GPL VERSION 3</strong>
+        <button id="close-license" type="button">Fechar</button>
+      </div>
+      <pre id="license-text"></pre>
+    </dialog>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
