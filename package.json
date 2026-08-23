@@ -1,7 +1,7 @@
 {
   "name": "golivebypass-safe",
   "productName": "GoLiveBypass Safe",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Windows-only, Tor-only GoLiveBypass fork with reversible installation",
   "author": "GoLiveBypass Safe contributors",
   "license": "GPL-3.0-only",
@@ -82,6 +82,7 @@
     }
   },
   "devDependencies": {
+    "@electron/asar": "3.4.1",
     "@electron/fuses": "2.1.3",
     "@types/node": "24.13.3",
     "electron": "43.4.1",

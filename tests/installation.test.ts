@@ -41,6 +41,17 @@ function fakePayload(root: string): string {
   return payload;
 }
 
+function persistLegacyOriginalPath(dataRoot: string, legacyOriginalPath: string): string {
+  const installations = path.join(dataRoot, "installations");
+  const names = fs.readdirSync(installations);
+  if (names.length !== 1 || names[0] === undefined) throw new Error("expected one installation record");
+  const recordPath = path.join(installations, names[0]);
+  const record = JSON.parse(fs.readFileSync(recordPath, "utf8")) as Record<string, unknown>;
+  record.originalPath = legacyOriginalPath;
+  fs.writeFileSync(recordPath, JSON.stringify(record));
+  return recordPath;
+}
+
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) fs.rmSync(directory, { recursive: true, force: true });
 });
@@ -64,13 +75,44 @@ describe("transactional installation", () => {
 
     expect(inspectTarget(target).state).toBe("installed");
     expect(fs.readFileSync(record.backupPath)).toEqual(original);
-    expect(fs.readFileSync(path.join(target.resourcesPath, "app.asar.golive-original"))).toEqual(original);
+    expect(fs.readFileSync(path.join(target.resourcesPath, "app.golive-original.asar"))).toEqual(original);
     expect(fs.statSync(path.join(target.resourcesPath, "app.asar")).isDirectory()).toBe(true);
 
     expect(uninstallAll(dataRoot)).toEqual(["Discord"]);
     expect(fs.readFileSync(path.join(target.resourcesPath, "app.asar"))).toEqual(original);
     expect(inspectTarget(target).state).toBe("vanilla");
     expect(installedRecords(dataRoot)).toEqual([]);
+  });
+
+  it("migrates a v0.1.0 local backup to an Electron-readable ASAR name", () => {
+    const root = temporaryDirectory();
+    const dataRoot = path.join(root, "data");
+    const { target, original } = fakeDiscord(root);
+    const payload = fakePayload(root);
+    installTarget(target, dataRoot, payload);
+    const corrected = path.join(target.resourcesPath, "app.golive-original.asar");
+    const legacy = path.join(target.resourcesPath, "app.asar.golive-original");
+    fs.renameSync(corrected, legacy);
+    const recordPath = persistLegacyOriginalPath(dataRoot, legacy);
+
+    expect(inspectTarget(target).state).toBe("installed");
+    installTarget(target, dataRoot, payload);
+    expect(fs.existsSync(legacy)).toBe(false);
+    expect(fs.readFileSync(corrected)).toEqual(original);
+    expect(JSON.parse(fs.readFileSync(recordPath, "utf8")).originalPath).toBe(legacy);
+  });
+
+  it("restores a v0.1.0 local backup directly", () => {
+    const root = temporaryDirectory();
+    const dataRoot = path.join(root, "data");
+    const { target, original } = fakeDiscord(root);
+    installTarget(target, dataRoot, fakePayload(root));
+    const legacy = path.join(target.resourcesPath, "app.asar.golive-original");
+    fs.renameSync(path.join(target.resourcesPath, "app.golive-original.asar"), legacy);
+    persistLegacyOriginalPath(dataRoot, legacy);
+
+    expect(uninstallAll(dataRoot)).toEqual(["Discord"]);
+    expect(fs.readFileSync(path.join(target.resourcesPath, "app.asar"))).toEqual(original);
   });
 
   it("refuses a loader owned by another mod without changing it", () => {
@@ -99,6 +141,32 @@ describe("transactional installation", () => {
       recordPath: string;
     };
 
+    fs.rmSync(transaction.livePath, { recursive: true });
+    fs.rmSync(transaction.recordPath);
+    const journal = path.join(dataRoot, "transactions", `${transaction.id}.jsonl`);
+    fs.mkdirSync(path.dirname(journal), { recursive: true });
+    fs.writeFileSync(
+      journal,
+      `${JSON.stringify({ phase: "planned", transaction })}\n${JSON.stringify({ phase: "original_moved" })}\n`,
+    );
+
+    expect(recoverTransactions(dataRoot)).toEqual(["Discord"]);
+    expect(fs.readFileSync(transaction.livePath)).toEqual(original);
+    expect(inspectTarget(target).state).toBe("vanilla");
+  });
+
+  it("recovers a v0.1.0 install journal after its local archive name was migrated", () => {
+    const root = temporaryDirectory();
+    const dataRoot = path.join(root, "data");
+    const { target, original } = fakeDiscord(root);
+    const transaction = installTarget(target, dataRoot, fakePayload(root)) as InstallationRecord & {
+      operation: "install";
+      livePath: string;
+      originalPath: string;
+      stagePath: string;
+      recordPath: string;
+    };
+    transaction.originalPath = path.join(target.resourcesPath, "app.asar.golive-original");
     fs.rmSync(transaction.livePath, { recursive: true });
     fs.rmSync(transaction.recordPath);
     const journal = path.join(dataRoot, "transactions", `${transaction.id}.jsonl`);

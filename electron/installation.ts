@@ -4,7 +4,8 @@ import path from "node:path";
 
 const SCHEMA = 1;
 const OWNER_FILE = ".golivebypass-owner.json";
-const ORIGINAL_NAME = "app.asar.golive-original";
+const ORIGINAL_NAME = "app.golive-original.asar";
+const LEGACY_ORIGINAL_NAME = "app.asar.golive-original";
 const FOREIGN_ORIGINAL_NAME = "_app.asar";
 
 export const DISCORD_FLAVOURS = ["Discord", "DiscordPTB", "DiscordCanary"] as const;
@@ -156,6 +157,17 @@ function recordPaths(dataRoot: string, id: string) {
   };
 }
 
+function localOriginalPath(resourcesPath: string): string | null {
+  const originalPath = path.join(resourcesPath, ORIGINAL_NAME);
+  const legacyOriginalPath = path.join(resourcesPath, LEGACY_ORIGINAL_NAME);
+  const originalExists = fs.existsSync(originalPath);
+  const legacyExists = fs.existsSync(legacyOriginalPath);
+  if (originalExists && legacyExists) throw new Error("Foram encontrados dois originais locais; nada foi alterado.");
+  if (originalExists) return originalPath;
+  if (legacyExists) return legacyOriginalPath;
+  return null;
+}
+
 function compareVersions(left: string, right: string): number {
   return left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });
 }
@@ -188,16 +200,25 @@ export function inspectTarget(target: DiscordTarget): TargetStatus {
   return withNoAsar(() => {
     const livePath = path.join(target.resourcesPath, "app.asar");
     const originalPath = path.join(target.resourcesPath, ORIGINAL_NAME);
+    const legacyOriginalPath = path.join(target.resourcesPath, LEGACY_ORIGINAL_NAME);
     const foreignOriginal = path.join(target.resourcesPath, FOREIGN_ORIGINAL_NAME);
     const id = recordId(target.resourcesPath);
+    const originalExists = fs.existsSync(originalPath);
+    const legacyExists = fs.existsSync(legacyOriginalPath);
 
     if (fs.existsSync(foreignOriginal)) {
       return { ...target, state: "foreign", detail: "Outro modificador ja usa _app.asar." };
     }
-    if (ownsLoader(livePath, target.resourcesPath, id) && fs.existsSync(originalPath)) {
-      return { ...target, state: "installed", detail: "Bypass instalado com backup local e externo." };
+    if (ownsLoader(livePath, target.resourcesPath, id)) {
+      if (originalExists !== legacyExists) {
+        const detail = legacyExists
+          ? "Bypass v0.1.0 detectado; Instalar ou Reparar migrara o backup local."
+          : "Bypass instalado com backup local e externo.";
+        return { ...target, state: "installed", detail };
+      }
+      return { ...target, state: "broken", detail: "O backup local esta ausente ou duplicado; use Restaurar original." };
     }
-    if (fs.existsSync(originalPath) || !fs.existsSync(livePath)) {
+    if (originalExists || legacyExists || !fs.existsSync(livePath)) {
       return { ...target, state: "broken", detail: "Instalacao interrompida; use Reparar." };
     }
     if (!fs.statSync(livePath).isFile()) {
@@ -241,7 +262,15 @@ export function installTarget(target: DiscordTarget, dataRoot: string, runtimePa
     if (status.state === "foreign") throw new Error(`${target.flavour}: recusado para preservar o outro modificador.`);
     if (status.state === "broken") throw new Error(`${target.flavour}: execute a recuperacao antes de instalar.`);
     if (status.state === "installed") {
-      return JSON.parse(fs.readFileSync(paths.recordPath, "utf8")) as InstallationRecord;
+      const record = JSON.parse(fs.readFileSync(paths.recordPath, "utf8")) as InstallationRecord;
+      const localOriginal = localOriginalPath(target.resourcesPath);
+      const legacyOriginalPath = path.join(target.resourcesPath, LEGACY_ORIGINAL_NAME);
+      const correctedOriginalPath = path.join(target.resourcesPath, ORIGINAL_NAME);
+      if (localOriginal === legacyOriginalPath) {
+        if (hashFile(localOriginal) !== record.originalSha256) throw new Error("O backup local v0.1.0 nao confere.");
+        fs.renameSync(localOriginal, correctedOriginalPath);
+      }
+      return record;
     }
 
     const livePath = path.join(target.resourcesPath, "app.asar");
@@ -325,7 +354,7 @@ export function uninstallAll(dataRoot: string): string[] {
     for (const record of readRecords(dataRoot)) {
       const paths = recordPaths(dataRoot, record.id);
       const livePath = path.join(record.resourcesPath, "app.asar");
-      const originalPath = path.join(record.resourcesPath, ORIGINAL_NAME);
+      const originalPath = localOriginalPath(record.resourcesPath) ?? path.join(record.resourcesPath, ORIGINAL_NAME);
       if (!fs.existsSync(record.resourcesPath)) continue;
       if (fs.existsSync(livePath) && !ownsLoader(livePath, record.resourcesPath, record.id)) {
         throw new Error(`${record.flavour}: app.asar mudou desde a instalacao; nada foi removido.`);
@@ -380,11 +409,14 @@ export function recoverTransactions(dataRoot: string): string[] {
       const journalPath = path.join(directory, name);
       const { transaction } = readJournal(journalPath);
       if (transaction.operation === "install") {
+        const originalPath = fs.existsSync(transaction.originalPath)
+          ? transaction.originalPath
+          : localOriginalPath(transaction.resourcesPath);
         if (ownsLoader(transaction.livePath, transaction.resourcesPath, transaction.id)) {
-          if (!fs.existsSync(transaction.originalPath)) throw new Error(`${transaction.flavour}: o original sumiu.`);
+          if (originalPath === null) throw new Error(`${transaction.flavour}: o original sumiu.`);
           writeJson(transaction.recordPath, transaction);
-        } else if (!fs.existsSync(transaction.livePath) && fs.existsSync(transaction.originalPath)) {
-          fs.renameSync(transaction.originalPath, transaction.livePath);
+        } else if (!fs.existsSync(transaction.livePath) && originalPath !== null) {
+          fs.renameSync(originalPath, transaction.livePath);
         } else if (fs.existsSync(transaction.livePath) && hashFile(transaction.livePath) !== transaction.originalSha256) {
           throw new Error(`${transaction.flavour}: recuperacao recusada porque app.asar mudou.`);
         }
@@ -397,11 +429,9 @@ export function recoverTransactions(dataRoot: string): string[] {
           continue;
         }
         if (!fs.existsSync(transaction.livePath)) {
-          const source = fs.existsSync(transaction.originalPath)
-            ? transaction.originalPath
-            : fs.existsSync(transaction.restoreStagePath)
-              ? transaction.restoreStagePath
-              : null;
+          const localOriginal = localOriginalPath(transaction.resourcesPath);
+          let source: string | null = fs.existsSync(transaction.originalPath) ? transaction.originalPath : localOriginal;
+          if (source === null && fs.existsSync(transaction.restoreStagePath)) source = transaction.restoreStagePath;
           if (source !== null) {
             fs.renameSync(source, transaction.livePath);
           } else if (fs.existsSync(transaction.loaderTrashPath)) {

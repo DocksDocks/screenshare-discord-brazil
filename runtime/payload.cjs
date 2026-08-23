@@ -143,7 +143,11 @@ app.whenReady().then(async () => {
 
 const injectorPath = require.main.filename;
 const resourcesDir = path.join(path.dirname(injectorPath), "..");
-const originalAsar = path.join(resourcesDir, "app.asar.golive-original");
+const originalAsar = path.join(resourcesDir, "app.golive-original.asar");
+const legacyOriginalAsar = path.join(resourcesDir, "app.asar.golive-original");
+if (!fs.existsSync(originalAsar) && fs.existsSync(legacyOriginalAsar)) {
+  fs.renameSync(legacyOriginalAsar, originalAsar);
+}
 const discordPackage = require(path.join(originalAsar, "package.json"));
 require.main.filename = path.join(originalAsar, discordPackage.main);
 app.setAppPath(originalAsar);

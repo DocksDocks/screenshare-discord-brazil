@@ -9,7 +9,7 @@ Fork Windows-only e Tor-only inspirado no [GoLiveBypass](https://github.com/bezu
 - A regra PAC nao tem alternativa `DIRECT` para os hosts protegidos.
 - Nao le token, cookie, usuario, streams, chamadas ou configuracao da conta.
 - Recusa `_app.asar`, Vencord, Equicord e qualquer carregador que nao tenha o marcador deste projeto.
-- Mantem o original renomeado junto ao Discord e uma segunda copia verificada fora da pasta de versao.
+- Mantem o original como `app.golive-original.asar`, ainda montavel pelo Electron, e uma segunda copia verificada fora da pasta de versao.
 - Registra cada fase da instalacao em um journal duravel e recupera interrupcoes antes de alterar novos arquivos.
 - Nao possui auto-updater, bootstrap remoto ou execucao de codigo vindo de `main`.
 - Rejeita caminhos absolutos, junctions, links, arquivos nao listados ou entradas que escapem do runtime do Tor.
@@ -47,7 +47,7 @@ O hash corresponde ao `sha256sums-unsigned-build.txt` publicado pelo Tor Project
 
 `probe:tor` inicia uma instancia temporaria e isolada, aguarda bootstrap completo e valida um handshake TLS autenticado com `gateway.discord.gg` por SOCKS5. Ele nao altera o Discord nem o runtime persistente.
 
-O executavel portatil fica em `release/GoLiveBypass-Safe-0.1.0.exe`. O build desativa `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS` e argumentos do inspector, exige `app.asar` e habilita a verificacao de integridade ASAR. Nao ha publicacao automatica.
+O executavel portatil fica em `release/GoLiveBypass-Safe-0.1.1.exe`. O build desativa `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS` e argumentos do inspector, exige `app.asar` e habilita a verificacao de integridade ASAR. Nao ha publicacao automatica.
 
 ## Verificacao
 
@@ -59,7 +59,7 @@ npm.cmd run compile
 npm.cmd run build:win
 ```
 
-Os testes cobrem ordenacao de versoes do Discord, instalacao e desinstalacao byte a byte, recusa de outro modificador, recuperacao em duas fases de falha, a regra PAC sem fallback, confinamento fisico e cobertura exata do manifesto, e identidade do processo Tor.
+Os testes cobrem ordenacao de versoes do Discord, instalacao e desinstalacao byte a byte, migracao e restauracao do nome usado pela v0.1.0, recusa de outro modificador, recuperacao em duas fases de falha, a regra PAC sem fallback, confinamento fisico e cobertura exata do manifesto, e identidade do processo Tor.
 
 ## Dados locais
 

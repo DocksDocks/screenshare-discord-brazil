@@ -22,6 +22,7 @@ metadata:
 10. Require an exact manifest-to-file-tree match and reject absolute paths, parent segments, drive prefixes, alternate data streams, links, junction escapes, and unlisted files.
 11. Reuse a saved Tor PID only after its Windows `ExecutablePath` exactly matches the packaged `tor.exe`.
 12. Keep production Electron fuses fail-closed: disable RunAsNode, Node options, and CLI inspection; require the integrity-checked `app.asar`.
+13. Keep the renamed Discord archive's filename ending in `.asar` so Electron can mount it. Preserve migration and restore support for v0.1.0's `app.asar.golive-original`.
 
 ## Runtime Layout
 
@@ -52,7 +53,7 @@ For routing changes, also inspect `runtime/proxy.pac` and keep tests for canonic
 
 For Tor runtime changes, run the isolated network probe and verify the packaged fuse state. The probe must never start, stop, or modify Discord.
 
-For installation changes, test normal install/uninstall, foreign-loader refusal, failure after moving the original, and failure after committing the loader.
+For installation changes, test normal install/uninstall, v0.1.0 migration and direct restore, foreign-loader refusal, failure after moving the original, and failure after committing the loader.
 
 ## Documentation
 
