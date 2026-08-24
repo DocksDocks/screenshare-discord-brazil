@@ -5,15 +5,24 @@ const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const { app, session } = require("electron");
-const { listContainedFiles, processMatchesExecutable, resolveContainedFile } = require("./runtime-safety.cjs");
+const { probeSocks5Tls, relayPortForExecutable, startGatewayRelay } = require("./gateway-relay.cjs");
+const {
+  listContainedFiles,
+  processMatchesExecutable,
+  processOwnsLoopbackTcpListener,
+  resolveContainedFile,
+} = require("./runtime-safety.cjs");
 
 const TOR_PORT = 9060;
-const BLOCK_PORT = 9;
 const runtimeDir = __dirname;
 const dataRoot = path.dirname(runtimeDir);
 const stateDir = path.join(dataRoot, "tor-state");
+const pidPath = path.join(stateDir, "tor.pid");
 const torExe = path.join(runtimeDir, "tor", "tor", "tor.exe");
-const pacText = fs.readFileSync(path.join(runtimeDir, "proxy.pac"), "utf8");
+const relayPort = relayPortForExecutable(process.execPath);
+const pacTemplate = fs.readFileSync(path.join(runtimeDir, "proxy.pac"), "utf8");
+if (!pacTemplate.includes("__GATEWAY_RELAY_PORT__")) throw new Error("runtime_integrity_failed");
+const pacText = pacTemplate.replaceAll("__GATEWAY_RELAY_PORT__", String(relayPort));
 const pacUrl = `data:application/x-ns-proxy-autoconfig;base64,${Buffer.from(pacText).toString("base64")}`;
 
 // Chromium receives the fail-closed route before Discord's original main module can create a session.
@@ -86,12 +95,51 @@ function writeTorrc() {
   return torrc;
 }
 
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+let ownershipQueue = Promise.resolve();
+let lastOwnershipStartedAt = 0n;
+let lastOwnershipResult = false;
+function torRouteIsOwned(notBefore = process.hrtime.bigint()) {
+  const request = ownershipQueue.then(async () => {
+    if (lastOwnershipStartedAt >= notBefore) return lastOwnershipResult;
+    lastOwnershipStartedAt = process.hrtime.bigint();
+    lastOwnershipResult = await processOwnsLoopbackTcpListener(trustedTorPid, torExe, TOR_PORT);
+    return lastOwnershipResult;
+  });
+  ownershipQueue = request.then(
+    () => undefined,
+    () => undefined,
+  );
+  return request;
+}
+
+async function waitForTor() {
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
+    if (
+      (await torRouteIsOwned()) &&
+      (await probeSocks5Tls(TOR_PORT, "gateway.discord.gg", 10_000)) &&
+      (await torRouteIsOwned())
+    ) {
+      log("tor_ready");
+      return;
+    }
+    await delay(500);
+  }
+  throw new Error("tor_unavailable");
+}
+
 let torProcess = null;
+let torReady;
+let trustedTorPid = 0;
 try {
   verifyTor();
-  const pidPath = path.join(stateDir, "tor.pid");
   const existingPid = fs.existsSync(pidPath) ? Number(fs.readFileSync(pidPath, "utf8").trim()) : 0;
   if (processMatchesExecutable(existingPid, torExe)) {
+    trustedTorPid = existingPid;
     log("tor_existing");
   } else {
     fs.rmSync(pidPath, { force: true });
@@ -101,36 +149,50 @@ try {
       windowsHide: true,
     });
     torProcess.once("error", () => log("tor_spawn_failed"));
-    torProcess.once("exit", (code) => log(code === 0 ? "tor_stopped" : "tor_failed"));
+    trustedTorPid = Number(torProcess.pid) || 0;
+    torProcess.once("exit", (code) => {
+      trustedTorPid = 0;
+      log(code === 0 ? "tor_stopped" : "tor_failed");
+    });
     torProcess.unref();
     log("tor_started");
   }
+  torReady = waitForTor();
 } catch {
   log("tor_blocked");
+  torReady = Promise.reject(new Error("tor_blocked"));
 }
+void torReady.catch(() => undefined);
+
+const gatewayRelay = startGatewayRelay({
+  listenPort: relayPort,
+  torPort: TOR_PORT,
+  torReady,
+  authorizeTor: torRouteIsOwned,
+  onRouted: () => log("gateway_routed"),
+});
 
 async function blockAllTraffic() {
   await session.defaultSession.setProxy({
     mode: "fixed_servers",
-    proxyRules: `socks5://127.0.0.1:${BLOCK_PORT}`,
+    proxyRules: `socks5://127.0.0.1:${relayPort}`,
   });
   await session.defaultSession.closeAllConnections();
 }
 
 app.whenReady().then(async () => {
   try {
-    await session.defaultSession.setProxy({ mode: "pac_script", pacScript: pacUrl });
+    await Promise.all([gatewayRelay.ready, torReady]);
     const [canonical, regional, ordinary] = await Promise.all([
       session.defaultSession.resolveProxy("https://gateway.discord.gg"),
       session.defaultSession.resolveProxy("https://gateway-us-east1-b.discord.gg"),
       session.defaultSession.resolveProxy("https://discord.com"),
     ]);
-    if (!canonical.includes(String(TOR_PORT)) || !regional.includes(String(TOR_PORT)) || ordinary !== "DIRECT") {
+    if (!canonical.includes(String(relayPort)) || !regional.includes(String(relayPort)) || ordinary !== "DIRECT") {
       await blockAllTraffic();
       log("route_verification_failed");
       return;
     }
-    await session.defaultSession.closeAllConnections();
     log("route_ready");
   } catch {
     try {
@@ -141,14 +203,26 @@ app.whenReady().then(async () => {
   }
 });
 
-const injectorPath = require.main.filename;
-const resourcesDir = path.join(path.dirname(injectorPath), "..");
-const originalAsar = path.join(resourcesDir, "app.golive-original.asar");
-const legacyOriginalAsar = path.join(resourcesDir, "app.asar.golive-original");
-if (!fs.existsSync(originalAsar) && fs.existsSync(legacyOriginalAsar)) {
-  fs.renameSync(legacyOriginalAsar, originalAsar);
+function loadDiscord() {
+  const injectorPath = require.main.filename;
+  const resourcesDir = path.join(path.dirname(injectorPath), "..");
+  const originalAsar = path.join(resourcesDir, "app.golive-original.asar");
+  const legacyOriginalAsar = path.join(resourcesDir, "app.asar.golive-original");
+  if (!fs.existsSync(originalAsar) && fs.existsSync(legacyOriginalAsar)) {
+    fs.renameSync(legacyOriginalAsar, originalAsar);
+  }
+  const discordPackage = require(path.join(originalAsar, "package.json"));
+  require.main.filename = path.join(originalAsar, discordPackage.main);
+  app.setAppPath(originalAsar);
+  require(require.main.filename);
 }
-const discordPackage = require(path.join(originalAsar, "package.json"));
-require.main.filename = path.join(originalAsar, discordPackage.main);
-app.setAppPath(originalAsar);
-require(require.main.filename);
+
+void gatewayRelay.ready
+  .then(() => {
+    if (app.isReady()) throw new Error("relay_started_too_late");
+    loadDiscord();
+  })
+  .catch(() => {
+    log("relay_blocked");
+    app.exit(1);
+  });

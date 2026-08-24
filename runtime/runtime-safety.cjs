@@ -1,6 +1,6 @@
 "use strict";
 
-const { execFileSync } = require("node:child_process");
+const { execFile, execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -68,4 +68,37 @@ function processMatchesExecutable(pid, expectedExecutable) {
   }
 }
 
-module.exports = { listContainedFiles, processMatchesExecutable, resolveContainedFile };
+function processOwnsLoopbackTcpListener(pid, expectedExecutable, port) {
+  if (
+    !Number.isSafeInteger(pid) ||
+    pid <= 0 ||
+    typeof expectedExecutable !== "string" ||
+    !Number.isSafeInteger(port) ||
+    port <= 0 ||
+    port > 65_535
+  ) {
+    return Promise.resolve(false);
+  }
+  const script = [
+    `$candidate = Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'`,
+    `$listener = Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' -LocalPort ${port} -OwningProcess ${pid} -ErrorAction SilentlyContinue`,
+    "if ($null -ne $candidate -and $null -ne $listener) { [Console]::Out.Write($candidate.ExecutablePath) }",
+  ].join("; ");
+  return new Promise((resolve) => {
+    execFile(
+      POWERSHELL,
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+      { encoding: "utf8", windowsHide: true, timeout: 10_000 },
+      (error, stdout) => {
+        if (error !== null) return resolve(false);
+        const actualExecutable = stdout.trim();
+        resolve(
+          actualExecutable.length > 0 &&
+            path.resolve(actualExecutable).toLowerCase() === path.resolve(expectedExecutable).toLowerCase(),
+        );
+      },
+    );
+  });
+}
+
+module.exports = { listContainedFiles, processMatchesExecutable, processOwnsLoopbackTcpListener, resolveContainedFile };

@@ -22,6 +22,7 @@ function projectLayout(root: string): void {
   fs.mkdirSync(path.join(root, "vendor", "tor", "tor"), { recursive: true });
   fs.writeFileSync(path.join(root, "runtime", "payload.cjs"), "payload\n");
   fs.writeFileSync(path.join(root, "runtime", "proxy.pac"), "pac\n");
+  fs.writeFileSync(path.join(root, "runtime", "gateway-relay.cjs"), "relay\n");
   fs.writeFileSync(path.join(root, "runtime", "runtime-safety.cjs"), "safety\n");
   fs.writeFileSync(path.join(root, "vendor", "tor", "tor", "tor.exe"), "tor\n");
   fs.writeFileSync(

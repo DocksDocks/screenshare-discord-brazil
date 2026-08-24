@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -7,6 +8,7 @@ import { describe, expect, it } from "vitest";
 interface RuntimeSafety {
   listContainedFiles(root: string): string[];
   processMatchesExecutable(pid: number, expectedExecutable: string): boolean;
+  processOwnsLoopbackTcpListener(pid: number, expectedExecutable: string, port: number): Promise<boolean>;
   resolveContainedFile(root: string, name: string): string;
 }
 
@@ -42,5 +44,20 @@ describe("runtime safety", () => {
     expect(safety.processMatchesExecutable(process.pid, process.execPath)).toBe(true);
     expect(safety.processMatchesExecutable(process.pid, path.join(os.tmpdir(), "not-node.exe"))).toBe(false);
     expect(safety.processMatchesExecutable(-1, process.execPath)).toBe(false);
+  });
+
+  it("matches a loopback listener to both its PID and executable", async () => {
+    const server = net.createServer();
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as net.AddressInfo).port;
+    try {
+      const owned = safety.processOwnsLoopbackTcpListener(process.pid, process.execPath, port);
+      expect(owned).toBeInstanceOf(Promise);
+      expect(await owned).toBe(true);
+      expect(await safety.processOwnsLoopbackTcpListener(process.pid, path.join(os.tmpdir(), "not-node.exe"), port)).toBe(false);
+      expect(await safety.processOwnsLoopbackTcpListener(process.pid, process.execPath, port + 1)).toBe(false);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });

@@ -15,7 +15,7 @@ const torRoot = path.join(projectRoot, "vendor", "tor");
 const torExe = path.join(torRoot, "tor", "tor.exe");
 const manifestPath = path.join(projectRoot, "vendor", "tor-manifest.json");
 const targetHost = "gateway.discord.gg";
-const socksPort = Number(process.env.GOLIVE_TOR_PROBE_PORT ?? "19060");
+const socksPort = Number(process.env.GOLIVE_TOR_PROBE_PORT ?? "19090");
 
 function sha256(file) {
   return createHash("sha256").update(fs.readFileSync(file)).digest("hex");

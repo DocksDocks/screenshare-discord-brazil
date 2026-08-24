@@ -13,6 +13,7 @@ interface TorManifest {
 interface RuntimeLayout {
   payloadPath: string;
   pacPath: string;
+  relayPath: string;
   safetyPath: string;
   manifestPath: string;
   torRoot: string;
@@ -28,6 +29,7 @@ function locateRuntime(sourceRoot: string): RuntimeLayout {
     ? {
         payloadPath: path.join(sourceRoot, "payload.cjs"),
         pacPath: path.join(sourceRoot, "proxy.pac"),
+        relayPath: path.join(sourceRoot, "gateway-relay.cjs"),
         safetyPath: path.join(sourceRoot, "runtime-safety.cjs"),
         manifestPath: path.join(sourceRoot, "tor-manifest.json"),
         torRoot: path.join(sourceRoot, "tor"),
@@ -35,6 +37,7 @@ function locateRuntime(sourceRoot: string): RuntimeLayout {
     : {
         payloadPath: path.join(sourceRoot, "runtime", "payload.cjs"),
         pacPath: path.join(sourceRoot, "runtime", "proxy.pac"),
+        relayPath: path.join(sourceRoot, "runtime", "gateway-relay.cjs"),
         safetyPath: path.join(sourceRoot, "runtime", "runtime-safety.cjs"),
         manifestPath: path.join(sourceRoot, "vendor", "tor-manifest.json"),
         torRoot: path.join(sourceRoot, "vendor", "tor"),
@@ -98,7 +101,7 @@ function filesBelow(root: string, current = root): string[] {
 
 function verifyRuntime(sourceRoot: string): { layout: RuntimeLayout; manifest: TorManifest } {
   const layout = locateRuntime(sourceRoot);
-  for (const required of [layout.payloadPath, layout.pacPath, layout.safetyPath, layout.manifestPath]) {
+  for (const required of [layout.payloadPath, layout.pacPath, layout.relayPath, layout.safetyPath, layout.manifestPath]) {
     if (!fs.existsSync(required) || !fs.statSync(required).isFile()) {
       throw new Error(`Runtime incompleto: ${path.basename(required)}.`);
     }
@@ -128,6 +131,7 @@ function runtimeIdentity(sourceRoot: string): string {
   return createHash("sha256")
     .update(sha256(layout.payloadPath))
     .update(sha256(layout.pacPath))
+    .update(sha256(layout.relayPath))
     .update(sha256(layout.safetyPath))
     .update(JSON.stringify(manifest))
     .digest("hex");
@@ -153,6 +157,7 @@ export function prepareRuntime(sourceRoot: string, dataRoot: string): string {
     fs.mkdirSync(stage);
     fs.copyFileSync(layout.payloadPath, path.join(stage, "payload.cjs"), fs.constants.COPYFILE_EXCL);
     fs.copyFileSync(layout.pacPath, path.join(stage, "proxy.pac"), fs.constants.COPYFILE_EXCL);
+    fs.copyFileSync(layout.relayPath, path.join(stage, "gateway-relay.cjs"), fs.constants.COPYFILE_EXCL);
     fs.copyFileSync(layout.safetyPath, path.join(stage, "runtime-safety.cjs"), fs.constants.COPYFILE_EXCL);
     fs.copyFileSync(layout.manifestPath, path.join(stage, "tor-manifest.json"), fs.constants.COPYFILE_EXCL);
     fs.cpSync(layout.torRoot, path.join(stage, "tor"), { recursive: true, errorOnExist: true, force: false });
