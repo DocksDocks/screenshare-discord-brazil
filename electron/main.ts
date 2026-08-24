@@ -96,7 +96,7 @@ async function installOrRepair(): Promise<Record<string, unknown>> {
   }
 }
 
-async function uninstall(): Promise<Record<string, unknown>> {
+async function restoreOriginalInstallations(): Promise<string[]> {
   if (!isWindows) throw new Error("Esta versao segura suporta somente Windows.");
   const current = currentTargets();
   const known = installedRecords(dataRoot()).map((record) => ({
@@ -112,11 +112,15 @@ async function uninstall(): Promise<Record<string, unknown>> {
   try {
     recoverTransactions(dataRoot());
     await stopManagedTor(dataRoot());
-    const restored = uninstallAll(dataRoot());
-    return overview(restored.length === 0 ? "Nenhuma instalacao nossa foi encontrada." : `Restaurado: ${restored.join(", ")}.`);
+    return uninstallAll(dataRoot(), current);
   } finally {
     restartDiscord(current, previouslyRunning);
   }
+}
+
+async function uninstall(): Promise<Record<string, unknown>> {
+  const restored = await restoreOriginalInstallations();
+  return overview(restored.length === 0 ? "Nenhuma instalacao nossa foi encontrada." : `Restaurado: ${restored.join(", ")}.`);
 }
 
 function assertTrustedSender(event: Electron.IpcMainInvokeEvent): void {
@@ -173,7 +177,16 @@ function createWindow(): void {
   });
 }
 
-if (!app.requestSingleInstanceLock()) {
+if (process.argv.includes("--restore-before-uninstall")) {
+  app.whenReady().then(async () => {
+    try {
+      await restoreOriginalInstallations();
+      app.exit(0);
+    } catch {
+      app.exit(1);
+    }
+  });
+} else if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on("second-instance", () => {

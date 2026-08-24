@@ -1,7 +1,7 @@
 {
   "name": "golivebypass-safe",
   "productName": "GoLiveBypass Safe",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Windows-only, Tor-only GoLiveBypass fork with reversible installation",
   "author": "GoLiveBypass Safe contributors",
   "license": "GPL-3.0-only",
@@ -17,7 +17,7 @@
     "compile": "npm run typecheck && npm run compile:electron && vite build",
     "test": "vitest run",
     "verify": "npm run typecheck && npm test",
-    "build:win": "npm run prepare:tor && npm run compile && electron-builder --win portable --x64 --publish never"
+    "build:win": "npm run prepare:tor && npm run compile && electron-builder --win --x64 --publish never"
   },
   "build": {
     "appId": "br.com.golivebypass.safe",
@@ -72,13 +72,32 @@
     "win": {
       "target": [
         {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
           "target": "portable",
           "arch": [
             "x64"
           ]
         }
-      ],
-      "artifactName": "GoLiveBypass-Safe-${version}.${ext}"
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "runAfterFinish": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "GoLiveBypass Safe",
+      "artifactName": "GoLiveBypassSafeSetup.${ext}",
+      "include": "build/installer.nsh",
+      "deleteAppDataOnUninstall": false
+    },
+    "portable": {
+      "artifactName": "GoLiveBypassSafePortable.${ext}"
     }
   },
   "devDependencies": {

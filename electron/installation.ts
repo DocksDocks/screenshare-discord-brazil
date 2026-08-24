@@ -331,13 +331,18 @@ function readRecords(dataRoot: string): InstallationRecord[] {
   return fs
     .readdirSync(directory)
     .filter((name) => name.endsWith(".json"))
-    .flatMap((name) => {
+    .map((name) => {
+      const recordPath = path.join(directory, name);
+      let record: unknown;
       try {
-        const record = JSON.parse(fs.readFileSync(path.join(directory, name), "utf8")) as InstallationRecord;
-        return record.schema === SCHEMA ? [record] : [];
+        record = JSON.parse(fs.readFileSync(recordPath, "utf8"));
       } catch {
-        return [];
+        throw new Error(`Registro de instalacao invalido: ${name}.`);
       }
+      if (typeof record !== "object" || record === null || !("schema" in record) || record.schema !== SCHEMA) {
+        throw new Error(`Registro de instalacao incompativel: ${name}.`);
+      }
+      return record as InstallationRecord;
     });
 }
 
@@ -348,7 +353,7 @@ function finalizeRestoredFile(record: InstallationRecord, livePath: string): voi
   fs.utimesSync(livePath, modified, modified);
 }
 
-export function uninstallAll(dataRoot: string): string[] {
+export function uninstallAll(dataRoot: string, requiredRestoredTargets: DiscordTarget[]): string[] {
   return withNoAsar(() => {
     const restored: string[] = [];
     for (const record of readRecords(dataRoot)) {
@@ -394,6 +399,13 @@ export function uninstallAll(dataRoot: string): string[] {
       fs.rmSync(paths.recordPath, { force: true });
       fs.rmSync(paths.journalPath, { force: true });
       restored.push(record.flavour);
+    }
+    const unresolved = requiredRestoredTargets.filter((target) => {
+      const state = inspectTarget(target).state;
+      return state === "installed" || state === "broken";
+    });
+    if (unresolved.length !== 0) {
+      throw new Error(`O Discord continua modificado em: ${unresolved.map((target) => target.flavour).join(", ")}.`);
     }
     return restored;
   });

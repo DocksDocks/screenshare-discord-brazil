@@ -78,7 +78,7 @@ describe("transactional installation", () => {
     expect(fs.readFileSync(path.join(target.resourcesPath, "app.golive-original.asar"))).toEqual(original);
     expect(fs.statSync(path.join(target.resourcesPath, "app.asar")).isDirectory()).toBe(true);
 
-    expect(uninstallAll(dataRoot)).toEqual(["Discord"]);
+    expect(uninstallAll(dataRoot, [target])).toEqual(["Discord"]);
     expect(fs.readFileSync(path.join(target.resourcesPath, "app.asar"))).toEqual(original);
     expect(inspectTarget(target).state).toBe("vanilla");
     expect(installedRecords(dataRoot)).toEqual([]);
@@ -111,7 +111,7 @@ describe("transactional installation", () => {
     fs.renameSync(path.join(target.resourcesPath, "app.golive-original.asar"), legacy);
     persistLegacyOriginalPath(dataRoot, legacy);
 
-    expect(uninstallAll(dataRoot)).toEqual(["Discord"]);
+    expect(uninstallAll(dataRoot, [target])).toEqual(["Discord"]);
     expect(fs.readFileSync(path.join(target.resourcesPath, "app.asar"))).toEqual(original);
   });
 
@@ -127,6 +127,28 @@ describe("transactional installation", () => {
     expect(inspectTarget(target).state).toBe("foreign");
     expect(() => installTarget(target, dataRoot, fakePayload(root))).toThrow(/preservar o outro modificador/);
     expect(fs.readFileSync(path.join(live, "index.js"), "utf8")).toBe("require('vencord');\n");
+  });
+
+  it("refuses to finish restoration when its installation record is missing", () => {
+    const root = temporaryDirectory();
+    const dataRoot = path.join(root, "data");
+    const { target } = fakeDiscord(root);
+    const record = installTarget(target, dataRoot, fakePayload(root));
+    fs.rmSync(path.join(dataRoot, "installations", `${record.id}.json`));
+
+    expect(() => uninstallAll(dataRoot, [target])).toThrow(/continua modificado/);
+    expect(inspectTarget(target).state).toBe("installed");
+  });
+
+  it("refuses to ignore a corrupt installation record", () => {
+    const root = temporaryDirectory();
+    const dataRoot = path.join(root, "data");
+    const { target } = fakeDiscord(root);
+    const record = installTarget(target, dataRoot, fakePayload(root));
+    fs.writeFileSync(path.join(dataRoot, "installations", `${record.id}.json`), "not json");
+
+    expect(() => uninstallAll(dataRoot, [target])).toThrow(/Registro de instalacao invalido/);
+    expect(inspectTarget(target).state).toBe("installed");
   });
 
   it("rolls back a crash after moving the original", () => {

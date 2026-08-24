@@ -23,6 +23,7 @@ metadata:
 11. Reuse a saved Tor PID only after its Windows `ExecutablePath` exactly matches the packaged `tor.exe`.
 12. Keep production Electron fuses fail-closed: disable RunAsNode, Node options, and CLI inspection; require the integrity-checked `app.asar`.
 13. Keep the renamed Discord archive's filename ending in `.asar` so Electron can mount it. Preserve migration and restore support for v0.1.0's `app.asar.golive-original`.
+14. A normal NSIS uninstall must restore Discord before deleting the manager and abort if restoration fails. Manager upgrades must not restore Discord.
 
 ## Runtime Layout
 
@@ -35,6 +36,8 @@ metadata:
 - `%LOCALAPPDATA%\GoLiveBypassSafe\runtime`: stable runtime copied by the manager.
 - `%LOCALAPPDATA%\GoLiveBypassSafe\transactions`: append-only transaction journals.
 - `%LOCALAPPDATA%\GoLiveBypassSafe\backups`: external original `app.asar` copies.
+- `GoLiveBypassSafeSetup.exe`: versionless per-user NSIS installer with shortcuts and restore-before-uninstall behavior.
+- `GoLiveBypassSafePortable.exe`: versionless emergency recovery manager.
 
 ## Required Verification
 
@@ -54,6 +57,8 @@ For routing changes, also inspect `runtime/proxy.pac` and keep tests for canonic
 For Tor runtime changes, run the isolated network probe and verify the packaged fuse state. The probe must never start, stop, or modify Discord.
 
 For installation changes, test normal install/uninstall, v0.1.0 migration and direct restore, foreign-loader refusal, failure after moving the original, and failure after committing the loader.
+
+For packaging changes, test both artifacts, install per-user, verify shortcuts, uninstall with an active loader, and confirm a manager upgrade does not restore Discord.
 
 ## Documentation
 

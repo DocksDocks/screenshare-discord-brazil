@@ -14,6 +14,7 @@ Fork Windows-only e Tor-only inspirado no [GoLiveBypass](https://github.com/bezu
 - Nao possui auto-updater, bootstrap remoto ou execucao de codigo vindo de `main`.
 - Rejeita caminhos absolutos, junctions, links, arquivos nao listados ou entradas que escapem do runtime do Tor.
 - Confia em um PID salvo somente quando o executavel correspondente ainda e o `tor.exe` empacotado.
+- Nao precisa manter o gerenciador aberto: o runtime local inicia com o Discord depois da primeira instalacao.
 
 ## Limites
 
@@ -47,7 +48,14 @@ O hash corresponde ao `sha256sums-unsigned-build.txt` publicado pelo Tor Project
 
 `probe:tor` inicia uma instancia temporaria e isolada, aguarda bootstrap completo e valida um handshake TLS autenticado com `gateway.discord.gg` por SOCKS5. Ele nao altera o Discord nem o runtime persistente.
 
-O executavel portatil fica em `release/GoLiveBypass-Safe-0.1.1.exe`. O build desativa `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS` e argumentos do inspector, exige `app.asar` e habilita a verificacao de integridade ASAR. Nao ha publicacao automatica.
+O build produz dois arquivos sem versao no nome; a versao continua registrada no binario e na release:
+
+- `release/GoLiveBypassSafeSetup.exe`: instalador por usuario, com atalhos no menu Iniciar e na area de trabalho.
+- `release/GoLiveBypassSafePortable.exe`: copia portatil para recuperacao emergencial.
+
+O instalador abre o gerenciador ao terminar, mas o usuario ainda confirma **Instalar com backup**. Ao remover o gerenciador pelo Windows, o desinstalador restaura o Discord primeiro e cancela sua propria remocao se a restauracao falhar. Atualizar apenas o gerenciador nao remove o bypass. Os dados e backups nao sao apagados automaticamente.
+
+O build desativa `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS` e argumentos do inspector, exige `app.asar` e habilita a verificacao de integridade ASAR. Nao ha publicacao automatica nem auto-updater.
 
 ## Verificacao
 
