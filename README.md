@@ -2,6 +2,44 @@
 
 Fork Windows-only e Tor-only inspirado no [GoLiveBypass](https://github.com/bezumiya/GoLiveBypass), refeito para reduzir os riscos encontrados na auditoria do commit `6af4a3c8a5178effcdeaf392b54e466b8a144753`.
 
+## Instalacao rapida
+
+1. Abra a pagina de [Releases](https://github.com/DocksDocks/screenshare-discord-brazil/releases) e baixe estes tres arquivos na mesma pasta:
+
+- `GoLiveBypassSafe.cer`
+- `Trust-GoLiveBypassSafe.ps1`
+- **Um** executavel: `GoLiveBypassSafeSetup.exe` ou `GoLiveBypassSafePortable.exe`
+
+Use o **Setup** para a instalacao normal, com atalhos e desinstalador. Use o **Portable** para executar o gerenciador sem instala-lo, principalmente para recuperacao. Se os dois executaveis estiverem na pasta, o comando abaixo usa o Setup.
+
+2. Nessa pasta, clique com o botao direito em uma area vazia e escolha **Abrir no Terminal** ou **Abrir no PowerShell**.
+3. Copie e cole todo o bloco abaixo de uma vez:
+
+```powershell
+$thumb = "4960FAD2932D56589F1DADFF3CBEE143FAA9EB35"
+$cerHash = "D5D0C0EE02D56A38910CF223A55EDFAA28223AFF8AABF54DCD322F0DB6EB078A"
+$cer = (Resolve-Path .\GoLiveBypassSafe.cer).Path
+$script = (Resolve-Path .\Trust-GoLiveBypassSafe.ps1).Path
+if ((Get-FileHash -LiteralPath $cer -Algorithm SHA256).Hash -ne $cerHash) { throw "Certificate hash mismatch" }
+$cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($cer)
+if ($cert.Thumbprint -ne $thumb) { throw "Certificate thumbprint mismatch" }
+foreach ($store in @("Cert:\CurrentUser\Root", "Cert:\CurrentUser\TrustedPublisher")) {
+  if (-not (Test-Path -LiteralPath (Join-Path $store $thumb))) { Import-Certificate -FilePath $cer -CertStoreLocation $store | Out-Null }
+}
+$sig = Get-AuthenticodeSignature -LiteralPath $script
+if ($sig.Status -ne "Valid" -or $sig.SignerCertificate.Thumbprint -ne $thumb) { throw "Trust script signature mismatch" }
+$app = @(".\GoLiveBypassSafeSetup.exe", ".\GoLiveBypassSafePortable.exe") | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if ($null -eq $app) { throw "Setup or Portable executable not found" }
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -SetupPath $app
+```
+
+4. Confirme o aviso do Windows para o certificado `GoLiveBypass Safe Private Release`.
+5. Quando o gerenciador abrir, clique em **Instalar com backup**. Depois, feche e abra o Discord novamente.
+
+O gerenciador nao precisa ficar aberto. Quando uma atualizacao do Discord criar uma nova pasta `app-VERSAO`, abra o Setup/Portable e clique em **Reparar apos update**.
+
+> Se o Smart App Control bloquear o executavel, consulte [Assinatura e Smart App Control](#assinatura-e-smart-app-control).
+
 ## O que muda
 
 - Usa apenas o Tor Expert Bundle oficial e fixado. Nao baixa listas publicas de proxy.
@@ -27,35 +65,6 @@ Fork Windows-only e Tor-only inspirado no [GoLiveBypass](https://github.com/bezu
 - Uma falha no Tor deixa o gateway desconectado em vez de usar o IP real.
 - O certificado privado desta release nao e emitido por um provedor publico. Com o Smart App Control ativo, o Windows ainda pode bloquear os binarios; nao existe excecao por aplicativo.
 - Modificar o cliente pode violar os Termos do Discord. O uso privado nao elimina risco regulatorio ou de conta.
-
-## Release privada assinada
-
-As releases privadas usam um certificado RSA autoassinado. A chave privada nao e exportavel e permanece somente no repositario de certificados do mantenedor; a release contem apenas o certificado publico.
-
-```text
-Certificado SHA-1: 4960FAD2932D56589F1DADFF3CBEE143FAA9EB35
-Arquivo CER SHA-256: D5D0C0EE02D56A38910CF223A55EDFAA28223AFF8AABF54DCD322F0DB6EB078A
-```
-
-Antes da primeira instalacao, compare esses valores por um canal confiavel. O comando abaixo autentica o certificado publico fixado, pede sua importacao explicita e verifica a assinatura do script antes de executa-lo com `ExecutionPolicy Bypass`.
-
-O Smart App Control considera apenas certificados de provedores confiaveis. Se ele bloquear esta release privada, desative-o em **Seguranca do Windows > Controle de aplicativos e navegador > Smart App Control**. Versoes atuais do Windows permitem ativa-lo novamente, mas nao oferecem liberacao para um unico aplicativo.
-
-Depois de baixar `GoLiveBypassSafeSetup.exe`, `GoLiveBypassSafe.cer` e `Trust-GoLiveBypassSafe.ps1` na mesma pasta, execute:
-
-```powershell
-$thumb = "4960FAD2932D56589F1DADFF3CBEE143FAA9EB35"; $cerHash = "D5D0C0EE02D56A38910CF223A55EDFAA28223AFF8AABF54DCD322F0DB6EB078A"; if ((Get-FileHash .\GoLiveBypassSafe.cer -Algorithm SHA256).Hash -ne $cerHash) { throw "Certificate hash mismatch" }; $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2((Resolve-Path .\GoLiveBypassSafe.cer).Path); if ($cert.Thumbprint -ne $thumb) { throw "Certificate thumbprint mismatch" }; foreach ($store in @("Cert:\CurrentUser\Root", "Cert:\CurrentUser\TrustedPublisher")) { if (-not (Test-Path (Join-Path $store $thumb))) { Import-Certificate .\GoLiveBypassSafe.cer -CertStoreLocation $store | Out-Null } }; $sig = Get-AuthenticodeSignature .\Trust-GoLiveBypassSafe.ps1; if ($sig.Status -ne "Valid" -or $sig.SignerCertificate.Thumbprint -ne $thumb) { throw "Trust script signature mismatch" }; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Trust-GoLiveBypassSafe.ps1
-```
-
-O script confere o hash e o thumbprint, pede a confirmacao explicita do Windows para instalar o certificado autoassinado exato em `CurrentUser\Root`, tambem o adiciona a `CurrentUser\TrustedPublisher`, valida sua propria assinatura e a do instalador, e so entao inicia a instalacao. A chave privada nunca e distribuida.
-
-O desinstalador restaura o Discord, mas nao remove silenciosamente uma decisao de confianca do Windows. Depois de desinstalar e usando o mesmo script autenticado acima, remova o certificado com:
-
-```powershell
-$thumb = "4960FAD2932D56589F1DADFF3CBEE143FAA9EB35"; $sig = Get-AuthenticodeSignature .\Trust-GoLiveBypassSafe.ps1; if ($sig.Status -ne "Valid" -or $sig.SignerCertificate.Thumbprint -ne $thumb) { throw "Trust script signature mismatch" }; powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Trust-GoLiveBypassSafe.ps1 -RemoveTrust
-```
-
-Enquanto esse certificado permanecer confiavel, qualquer codigo futuro assinado pela mesma chave privada tambem sera aceito para esse usuario. Remova-o quando nao precisar mais de releases privadas.
 
 ## Desenvolvimento
 
@@ -110,6 +119,30 @@ Os testes cobrem ordenacao de versoes do Discord, instalacao e desinstalacao byt
 O runtime, journals e backups ficam em `%LOCALAPPDATA%\GoLiveBypassSafe`.
 
 O log `runtime.log` contem somente horario e codigos de estado como `tor_started`, `tor_ready`, `gateway_routed`, `route_ready` e `route_blocked`. Nao registra URLs, proxies, conta ou sessao.
+
+## Assinatura e Smart App Control
+
+As releases usam um certificado RSA autoassinado. A chave privada nao e exportavel e permanece somente no computador do mantenedor; a release publica contem apenas o certificado publico.
+
+```text
+Certificado SHA-1: 4960FAD2932D56589F1DADFF3CBEE143FAA9EB35
+Arquivo CER SHA-256: D5D0C0EE02D56A38910CF223A55EDFAA28223AFF8AABF54DCD322F0DB6EB078A
+```
+
+O comando de instalacao autentica esses valores, importa o certificado exato em `CurrentUser\Root` e `CurrentUser\TrustedPublisher`, valida a assinatura do `.ps1` e somente depois o executa. Compare os valores acima por outro canal confiavel antes da primeira instalacao.
+
+O Smart App Control considera apenas certificados emitidos por provedores publicamente confiaveis. Se ele bloquear esta release, desative-o em **Seguranca do Windows > Controle de aplicativos e navegador > Smart App Control**. O Windows nao oferece uma excecao por aplicativo.
+
+O desinstalador restaura o Discord, mas nao remove silenciosamente uma decisao de confianca do Windows. Depois de desinstalar, valide novamente a assinatura do script e remova o certificado com:
+
+```powershell
+$thumb = "4960FAD2932D56589F1DADFF3CBEE143FAA9EB35"
+$sig = Get-AuthenticodeSignature .\Trust-GoLiveBypassSafe.ps1
+if ($sig.Status -ne "Valid" -or $sig.SignerCertificate.Thumbprint -ne $thumb) { throw "Trust script signature mismatch" }
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Trust-GoLiveBypassSafe.ps1 -RemoveTrust
+```
+
+Enquanto esse certificado permanecer confiavel, qualquer codigo futuro assinado pela mesma chave privada tambem sera aceito para esse usuario. Remova-o quando nao precisar mais das releases.
 
 ## Licenca
 
