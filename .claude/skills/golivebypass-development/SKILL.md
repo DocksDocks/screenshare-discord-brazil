@@ -3,7 +3,7 @@ name: golivebypass-development
 description: Use when changing the GoLiveBypass Safe installer, Discord injection, Tor runtime, PAC routing, packaging, or recovery tests. Not for unrelated project administration.
 user-invocable: false
 metadata:
-  updated: "2026-08-23"
+  updated: "2026-08-25"
 ---
 
 # GoLiveBypass Safe Development
@@ -28,6 +28,7 @@ metadata:
 16. Treat Tor as ready only when the exact packaged executable owns the configured loopback listener and an authenticated TLS probe succeeds. Recheck listener ownership asynchronously before and after every upstream tunnel; never block Electron's main thread on PowerShell.
 17. Keep the private release key non-exportable in `CurrentUser\\My`. Ship only the pinned public certificate; importing the exact self-signed certificate into `CurrentUser\\Root` requires explicit Windows confirmation, and `TrustedPublisher` limits publisher trust to that signer. Ship and document an authenticated removal path.
 18. Sign release executables and the friend trust script with the pinned RSA certificate, but exclude the official `tor.exe` and verify its packaged hash against the manifest after every build.
+19. Never disable Smart App Control silently. Reject reparse points in friend artifact paths and hold read-only locks through execution. Change `VerifiedAndReputablePolicyState` from `Enforce` to `Off` only after exact typed consent, recheck the elevated state, refresh with `CiTool`, and leave `Evaluation` unchanged. Attempt and verify rollback and trust cleanup on any failed helper run, report when either cannot be confirmed, and retain trust after the helper completes successfully so repair and uninstall remain possible.
 
 ## Runtime Layout
 
