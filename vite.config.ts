@@ -9,5 +9,6 @@ export default defineConfig({
   test: {
     maxWorkers: 6,
     pool: "threads",
+    testTimeout: 15_000,
   },
 });

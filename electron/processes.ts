@@ -122,7 +122,7 @@ function terminateExactProcesses(
     "$specs = @($env:GOLIVE_PROCESS_SPECS | ConvertFrom-Json)",
     "$opened = @()",
     "foreach ($spec in $specs) {",
-    "  try { $candidate = Get-Process -Id ([int]$spec.ProcessId) -ErrorAction Stop; $null = $candidate.Handle } catch [Microsoft.PowerShell.Commands.ProcessCommandException] { continue } catch { [pscustomobject]@{ Status = 'error'; Killed = @() } | ConvertTo-Json -Compress; exit 0 }",
+    "  try { $candidate = Get-Process -Id ([int]$spec.ProcessId) -ErrorAction Stop; $null = $candidate.Handle } catch { if ($_.FullyQualifiedErrorId -ceq 'NoProcessFoundForGivenId,Microsoft.PowerShell.Commands.GetProcessCommand') { continue }; [pscustomobject]@{ Status = 'error'; Killed = @() } | ConvertTo-Json -Compress; exit 0 }",
     "  $actualPath = [IO.Path]::GetFullPath($candidate.Path)",
     "  $expectedPath = [IO.Path]::GetFullPath([string]$spec.ExecutablePath)",
     "  $created = ([DateTimeOffset]$candidate.StartTime).ToUnixTimeMilliseconds()",

@@ -23,13 +23,14 @@ metadata:
 11. Reuse a saved Tor PID only after its Windows `ExecutablePath` exactly matches the packaged `tor.exe`.
 12. Keep production Electron fuses fail-closed: disable RunAsNode, Node options, and CLI inspection; require the integrity-checked `app.asar`.
 13. Keep the renamed Discord archive's filename ending in `.asar` so Electron can mount it. Preserve migration and restore support for v0.1.0's `app.asar.golive-original`.
-14. A normal NSIS uninstall must restore Discord before deleting the manager and abort if restoration fails. Manager upgrades must not restore Discord.
+14. A normal NSIS uninstall must refuse to continue while the manager is open, restore Discord before deleting the manager, and abort if restoration fails. NSIS must never terminate processes or execute an old registered uninstaller; verify and remove that exact block from the pinned electron-builder template only for the duration of a build, and restore the dependency bytes in `finally`. Release upgrades are explicit restore-and-uninstall operations.
 15. Bind the flavour-specific local gateway relay before loading Discord. Accept only domain-form `discord.gg` targets on port 443 and return SOCKS success only after an upstream tunnel exists.
 16. Treat Tor as ready only when the exact packaged executable owns the configured loopback listener and an authenticated TLS probe succeeds. Recheck listener ownership asynchronously before and after every upstream tunnel; never block Electron's main thread on PowerShell.
-17. Keep the private release key non-exportable in `CurrentUser\\My`. Ship only the pinned public certificate; importing the exact self-signed certificate into `CurrentUser\\Root` requires explicit Windows confirmation, and `TrustedPublisher` limits publisher trust to that signer. Ship and document an authenticated removal path.
-18. Sign release executables and the friend trust script with the pinned RSA certificate, but exclude the official `tor.exe` and verify its packaged hash against the manifest after every build.
-19. Deliberately launching `Install-GoLiveBypassSafe.bat` is consent; do not add typed or manager confirmations. Reject reparse points and hold read-only artifact locks. Elevate only the fixed signed SAC supervisor, never Setup or manager. Force Setup to a known local directory, confirm it through the fixed NSIS install registration, require the exact build hash of the complete installed application tree and the manager signer, and hold read locks on that tree during headless installation and rollback. Release those locks only before uninstall cleanup, and preserve the installed manager when application restoration fails. Change `VerifiedAndReputablePolicyState` only temporarily from `Enforce` to `Off`, leave `Evaluation` unchanged, and restore the prior state before acknowledging success. Keep automatic installation compensating: confirm termination of timed-out process trees through handles whose PID and creation time both match, restore Discord, remove a manager created by the failed attempt, and accept either success restoration or failure rollback only after registry readback and `CiTool --list-policies` confirm the effective state following `CiTool --refresh`. Under a prior `Enforce` state, the controller must own a per-run named mutex from before helper launch through Setup, manager, and any failure cleanup; the helper must acquire it before restoring SAC, including after controller loss through abandoned ownership. Release it before `COMMIT`, or after cleanup and before `ABORT` if success restoration fails. Treat a verified helper exit after a lost success reply as committed; otherwise report restoration uncertainty distinctly and retain trust only after success.
-20. Private release builds require synchronized `0.2.4` metadata, pinned npm 11.16.0, a clean worktree, and an annotated version tag at `HEAD`. Explicit dirty builds are development-only and must record that state. Reinstall the locked dependency tree with an explicit install-script allow/deny policy and dangerous overrides disabled, clean stale output and Electron Builder diagnostics, and verify signatures, embedded version, Electron fuses, complete runtime/Tor contents, unchanged source provenance through the final signing step, and the exact final artifact set without publishing. Produce and retain only a deterministic versioned ZIP with fixed entry order and timestamps, then recheck every bundled entry against its source hash.
+17. Releases are intentionally unsigned. Require users to authenticate the top-level ZIP SHA-256 through the GitHub release or another independent channel; internal checksums detect extraction corruption but are not an independent trust root. Do not add certificates, trust-store mutation, or signing secrets.
+18. Require Smart App Control to be `Off` or unavailable before installation. Never change SAC automatically; users disable and re-enable it through Windows Security. Keep the controller unelevated and reject `Enforce` and `Evaluation` before Setup starts.
+19. Deliberately launching `Install-GoLiveBypassSafe.bat` is consent. Reject reparse points, serialize controller runs across sessions with a global named mutex, hold read-only artifact locks, force Setup to the fixed per-user directory, confirm its install and uninstall registrations through both NSIS registry views, require the exact Setup hash and complete manager-tree hash, and re-enumerate the locked tree immediately before install and rollback. Reuse an existing manager only when its tree, uninstaller path, and registrations exactly match the current release; require older or incomplete installations to be removed before Setup so NSIS cannot execute an unauthenticated old uninstaller. Never terminate a process or restore Discord unless the launched process identity and complete tree termination were confirmed, never execute the excluded uninstaller during automatic rollback, and preserve the installed manager, registry, and shortcuts after every failed Setup attempt for explicit recovery or uninstall.
+20. Release builds require synchronized `0.2.5` metadata, pinned Node.js 24.18.0 and npm 11.16.0, a clean worktree, and an annotated version tag at `HEAD`. Explicit dirty builds are development-only and must record that state. Reinstall the locked dependency tree with an explicit install-script policy, clean stale output, and verify embedded version, Electron fuses, complete runtime/Tor contents, source provenance, hashes, and the exact final artifact set. Produce and retain only a deterministic versioned ZIP, then recheck every bundled entry against its source hash.
+21. Keep CI and release workflows separate. Pull requests and branch pushes use read-only permissions. Tag releases run only on GitHub-hosted Windows runners, require the tagged commit to remain reachable from `main`, pin every action to its reviewed repository and full commit SHA, disable checkout credential persistence, enforce timeouts and concurrency, upload only the ZIP, and validate the uploaded asset state, digest, and remote tag immediately before and after publication. Publish with semantic-version-aware latest-release selection and return the release to draft if post-publication validation fails.
 
 ## Runtime Layout
 
@@ -46,9 +47,8 @@ metadata:
 - `%LOCALAPPDATA%\GoLiveBypassSafe\backups`: external original `app.asar` copies.
 - `GoLiveBypassSafeSetup.exe`: versionless per-user NSIS installer with shortcuts and restore-before-uninstall behavior.
 - `Install-GoLiveBypassSafe.bat`: fixed unelevated launcher; accepts and forwards no arguments.
-- `Trust-GoLiveBypassSafe.ps1` and `GoLiveBypassSafe.cer`: signed unprivileged controller and pinned public certificate. The build binds exact release artifact hashes into the controller.
-- `Sac-GoLiveBypassSafe.ps1`: the only elevated component; a signed SAC supervisor with a bounded authenticated rollback channel.
-- `GoLiveBypassSafe-vX.Y.Z.zip`: sole release asset; deterministic bundle containing Setup, controller, SAC helper, launcher, certificate, provenance, and checksums.
+- `Install-GoLiveBypassSafe.ps1`: unsigned unelevated controller with release-bound Setup and manager-tree hashes.
+- `GoLiveBypassSafe-vX.Y.Z.zip`: sole release asset; deterministic bundle containing Setup, controller, launcher, provenance, and checksums.
 
 ## Required Verification
 
@@ -60,7 +60,7 @@ npm.cmd test
 npm.cmd run prepare:tor
 npm.cmd run probe:tor
 npm.cmd run compile
-npm.cmd run build:private
+npm.cmd run build:release
 ```
 
 For routing changes, inspect `runtime/proxy.pac` and the relay. Keep tests for canonical, regional, remote-auth, trailing-dot, unrelated, suffix-confusion, malformed SOCKS, delayed Tor, and unauthorized listener cases.
@@ -71,9 +71,9 @@ For installation changes, test normal install/uninstall, v0.1.0 migration and di
 
 For packaging changes, test the per-user installer, verify shortcuts, require a ZIP-only final release directory, uninstall with an active loader, and confirm a manager upgrade does not restore Discord.
 
-For signing changes, verify the exact signer on Setup, the unpacked manager, and the trust scripts. Confirm the public certificate has no private key, the controller rejects substitutions, and packaged `tor.exe` remains byte-identical to the pinned manifest.
+For release-authentication changes, keep executable signing explicitly disabled, reject certificate/trust infrastructure, verify the Setup and complete manager tree before execution, and keep packaged `tor.exe` byte-identical to the pinned manifest.
 
-For SAC changes, use disposable Windows VMs to verify `Enforce` is restored after successful install, repair, and uninstall; verify `Evaluation`, `Off`, and missing states remain unchanged; and verify every failure path restores the prior configured and effective state.
+For SAC changes, verify that `Enforce` and `Evaluation` stop before Setup, while `Off` and unavailable states proceed without registry mutation or elevation. Document manual re-enablement after install, repair, and uninstall.
 
 ## Documentation
 

@@ -12,13 +12,11 @@ $ErrorActionPreference = "Stop"
 
 $releaseRoot = (Resolve-Path -LiteralPath $ReleaseDirectory).Path
 $inputNames = @(
-  "GoLiveBypassSafe.cer",
   "GoLiveBypassSafeSetup.exe",
   "Install-GoLiveBypassSafe.bat",
-  "Sac-GoLiveBypassSafe.ps1",
+  "Install-GoLiveBypassSafe.ps1",
   "SHA256SUMS.txt",
-  "SOURCE.txt",
-  "Trust-GoLiveBypassSafe.ps1"
+  "SOURCE.txt"
 )
 $inputPaths = foreach ($name in $inputNames) {
   $file = Get-Item -LiteralPath (Join-Path $releaseRoot $name) -Force

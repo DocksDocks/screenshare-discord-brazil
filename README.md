@@ -4,18 +4,18 @@ Fork Windows-only e Tor-only inspirado no [GoLiveBypass](https://github.com/bezu
 
 ## Instalacao rapida
 
-1. Abra a pagina de [Releases](https://github.com/DocksDocks/screenshare-discord-brazil/releases) e baixe `GoLiveBypassSafe-v0.2.4.zip`.
-2. Compare o SHA-256 exibido pelo GitHub, extraia todo o ZIP para uma pasta e confira os arquivos com `SHA256SUMS.txt`.
-3. Execute `Install-GoLiveBypassSafe.bat` normalmente, sem **Executar como administrador**.
-4. Confirme somente o UAC do helper `Sac-GoLiveBypassSafe.ps1` quando ele for exibido. O Setup e o gerenciador continuam sem elevacao.
+1. Abra a pagina de [Releases](https://github.com/DocksDocks/screenshare-discord-brazil/releases) e baixe `GoLiveBypassSafe-v0.2.5.zip`.
+2. Compare o SHA-256 exibido pelo GitHub e extraia todo o ZIP para uma pasta.
+3. Em **Seguranca do Windows > Controle de aplicativos e navegador > Smart App Control**, selecione **Desativado**.
+4. Se uma versao anterior estiver instalada, abra o manager, restaure o Discord e desinstale essa versao antes de continuar.
+5. Execute `Install-GoLiveBypassSafe.bat` normalmente, sem **Executar como administrador**.
+6. Depois de `GOLIVE_AUTOMATION_OK`, volte ao Windows Security e ligue novamente o Smart App Control.
 
-Somente o ZIP deterministico e publicado como asset da release. Os archives **Source code** gerados automaticamente pelo GitHub nao sao instaladores.
+O controller recusa iniciar enquanto o Smart App Control estiver em `Enforce` ou `Evaluation`. Ele nao altera o registro do SAC, nao solicita UAC e nao instala certificados. Em sistemas nos quais o SAC nao esta disponivel, nenhuma alteracao e necessaria.
 
-Executar o BAT deliberadamente constitui o consentimento para o fluxo. Nao ha confirmacao digitada nem clique no gerenciador: o controller assinado instala o Setup em modo silencioso, autentica o gerenciador instalado e o executa com `--install-and-exit`.
+Somente o ZIP deterministico e publicado como asset da release. Os archives **Source code** gerados automaticamente pelo GitHub nao sao instaladores. O hash do proprio ZIP, obtido pela pagina da release ou por outro canal confiavel, e a fronteira de autenticidade; `SHA256SUMS.txt` confere os arquivos depois da extracao, mas nao substitui essa verificacao externa.
 
-O controller valida hashes e assinaturas fixados, mantem locks de leitura sobre os artefatos e registra o estado SAC anterior. Quando o estado era `Enforce`, um mutex nomeado por tentativa impede o helper de restaura-lo durante Setup, manager ou limpeza de falha; se o controller cair, o Windows libera essa posse abandonada para o helper continuar a restauracao. O helper elevado so confirma o `COMMIT` depois de restaurar o SAC anterior, executar `CiTool.exe --refresh` e consultar a politica efetivamente aplicada com `CiTool.exe --list-policies`. Falha, cancelamento ou timeout encerra e confirma a saida da arvore do processo usando handles vinculados a PID e horario de criacao, restaura o Discord e remove o manager quando ele foi criado pela tentativa. A tentativa tambem remove somente a confianca que ela propria adicionou. O codigo `GOLIVE_AUTOMATION_ROLLBACK_UNCONFIRMED` identifica separadamente a restauracao nao confirmada de aplicativo, SAC ou confianca e exige conferir o Windows Security e o Discord antes de tentar novamente.
-
-Quando o estado anterior e `Enforce`, ele fica em `Off` somente durante Setup e manager e volta para `Enforce` antes da confirmacao de sucesso. `Evaluation`, `Off` e valor ausente permanecem inalterados.
+Executar o BAT deliberadamente constitui consentimento para o fluxo. O controller valida os hashes fixados do Setup e da arvore completa do manager, rejeita links e junctions, impede duas instalacoes simultaneas e mantem locks de leitura durante a execucao. Falha ou timeout so permite restauracao depois de confirmar a saida da arvore de processos. O Discord e restaurado quando necessario, mas o manager instalado fica preservado para recuperacao ou desinstalacao manual. `GOLIVE_AUTOMATION_ROLLBACK_UNCONFIRMED` exige conferir o Discord antes de tentar novamente.
 
 ## O que muda
 
@@ -40,20 +40,19 @@ Quando o estado anterior e `Enforce`, ele fica em `Off` somente durante Setup e 
 - O projeto recusa instalar quando detecta proxy/PAC do sistema, pois substituir essa politica silenciosamente seria inseguro.
 - Tor adiciona latencia ao gateway. Midia, voz e video nao passam pelo Tor.
 - Uma falha no Tor deixa o gateway desconectado em vez de usar o IP real.
-- O certificado privado desta release nao e emitido por um provedor publico. No estado `Enforce`, o Smart App Control ainda pode bloquear os binarios; nao existe excecao por aplicativo.
+- Os executaveis e scripts nao sao assinados. O Smart App Control precisa permanecer desligado durante instalacao, reparo e desinstalacao, e deve ser ligado manualmente depois.
 - Modificar o cliente pode violar os Termos do Discord. O uso privado nao elimina risco regulatorio ou de conta.
 
 ## Desenvolvimento
 
-Requisitos: Windows x64, Node.js 24, npm 11.16.0 e o `tar.exe` incluido no Windows moderno.
+Requisitos: Windows x64, Node.js 24.18.0, npm 11.16.0 e o `tar.exe` incluido no Windows moderno.
 
 ```powershell
-npm.cmd install
+npm.cmd ci --strict-allow-scripts=true --dangerously-allow-all-scripts=false --ignore-scripts=false
 npm.cmd run verify
 npm.cmd run prepare:tor
 npm.cmd run probe:tor
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\new-private-signing-certificate.ps1
-npm.cmd run build:private
+npm.cmd run build:release
 ```
 
 `prepare:tor` baixa somente este artefato:
@@ -67,19 +66,21 @@ O hash corresponde ao `sha256sums-unsigned-build.txt` publicado pelo Tor Project
 
 `probe:tor` inicia uma instancia temporaria e isolada, aguarda bootstrap completo e valida um handshake TLS autenticado com `gateway.discord.gg` por SOCKS5. Ele nao altera o Discord nem o runtime persistente.
 
-O build privado publica somente `release/GoLiveBypassSafe-v0.2.4.zip`. O ZIP contem estes arquivos; a versao continua registrada no binario e na release:
+## Release
 
-- `GoLiveBypassSafeSetup.exe`: instalador por usuario, com atalhos no menu Iniciar e na area de trabalho.
-- `Install-GoLiveBypassSafe.bat`: launcher automatico sem elevacao.
-- `Trust-GoLiveBypassSafe.ps1`: controller assinado e vinculado aos hashes da release.
-- `Sac-GoLiveBypassSafe.ps1`: unico helper elevado, assinado e limitado ao SAC.
-- `GoLiveBypassSafe.cer`: certificado publico, sem chave privada.
-- `SOURCE.txt`: versao, commit e estado `release` ou `development` vinculados ao controller assinado.
-- `SHA256SUMS.txt`: hashes dos seis artefatos anteriores.
+O build publica somente `release/GoLiveBypassSafe-v0.2.5.zip`, contendo:
 
-O BAT instala o Setup silenciosamente em um destino conhecido, confirma esse destino pelo registro NSIS e autentica a assinatura do gerenciador e o hash da arvore completa instalada antes de manter todos esses arquivos bloqueados para leitura e executar o gerenciador em modo headless. Em uma falha, esse mesmo binario restaura o Discord antes de qualquer remocao; se a restauracao falhar, ele e preservado para recuperacao. Ao remover o gerenciador pelo Windows, o desinstalador restaura o Discord primeiro e cancela sua propria remocao se a restauracao falhar. Atualizar apenas o gerenciador nao remove o bypass. Os dados e backups nao sao apagados automaticamente.
+- `GoLiveBypassSafeSetup.exe`: instalador NSIS por usuario.
+- `Install-GoLiveBypassSafe.bat`: launcher sem elevacao.
+- `Install-GoLiveBypassSafe.ps1`: controller com os hashes fixados da release.
+- `SOURCE.txt`: versao, commit e estado `release` ou `development`.
+- `SHA256SUMS.txt`: hashes dos quatro artefatos anteriores.
 
-O build desativa `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS` e argumentos do inspector, exige `app.asar` e habilita a verificacao de integridade ASAR. Ele exige versoes sincronizadas, npm 11.16.0, arvore limpa e tag anotada para uma release; `-AllowDirty` produz somente um build local marcado como `development`. O pipeline reinstala exatamente o `package-lock.json` com a politica estrita de scripts e overrides perigosos desativados, permitindo somente o script de instalacao do Electron declarado em `package.json`, limpa saidas antigas, executa `verify`, confere versao, assinaturas, fuses, toda a arvore runtime/Tor e a imutabilidade do source ate o fim da assinatura, e vincula commit e hashes ao controller assinado. O ZIP usa ordem e horario fixos, cada entrada e reaberta e comparada por SHA-256 com seu artefato de origem e todos os arquivos soltos sao removidos depois da verificacao. Nao ha publicacao automatica nem auto-updater.
+O Setup usa um destino local fixo e o controller confirma esse destino pela chave NSIS. A arvore completa instalada, exceto o desinstalador que nao e executado pelo rollback automatico, precisa corresponder ao hash do build antes de o manager rodar. Uma arvore da mesma release pode ser reutilizada para reparo; versoes anteriores e estados incompletos precisam ser desinstalados primeiro, evitando que o Setup execute um desinstalador antigo nao autenticado. Em uma falha, o mesmo manager autenticado restaura o Discord e a instalacao permanece disponivel para recuperacao; nenhum processo de falha apaga automaticamente executaveis, registros ou atalhos. O desinstalador normal restaura o Discord antes de remover o manager e aborta se isso falhar.
+
+O pipeline reinstala exatamente o `package-lock.json`, executa `verify`, confere versao, fuses Electron, runtime/Tor, procedencia e o conjunto final de artefatos. O ZIP usa ordem e horario fixos e cada entrada e reaberta e comparada por SHA-256. `build:release` exige arvore limpa e tag anotada em `HEAD`; `-AllowDirty` gera somente build local marcado como `development`.
+
+`.github/workflows/ci.yml` verifica pushes e pull requests com permissao somente de leitura. `.github/workflows/release.yml` reage a tags anotadas `vX.Y.Z`: um job somente leitura gera o ZIP e um runner novo, com permissao de publicacao, baixa o artifact, revalida hash e identidade remota da tag, atualiza ou cria uma release draft retomavel e so a publica depois de comparar nome, tamanho e digest do unico asset. As actions sao fixadas por SHA e nenhum secret externo e necessario.
 
 ## Verificacao
 
@@ -88,10 +89,10 @@ npm.cmd run typecheck
 npm.cmd test
 npm.cmd run probe:tor
 npm.cmd run compile
-npm.cmd run build:private
+npm.cmd run build:release
 ```
 
-Os testes cobrem ordenacao de versoes do Discord, instalacao e desinstalacao byte a byte, migracao e restauracao do nome usado pela v0.1.0, recusa de outro modificador, recuperacao em duas fases de falha, a regra PAC sem fallback, o relay SOCKS, confinamento fisico e cobertura exata do manifesto, identidade do processo e do listener Tor, e os pinos do certificado.
+Os testes cobrem ordenacao de versoes do Discord, instalacao e desinstalacao byte a byte, migracao e restauracao do nome usado pela v0.1.0, recusa de outro modificador, recuperacao em duas fases de falha, regra PAC sem fallback, relay SOCKS, confinamento fisico, identidade de processos, hashes do pacote e invariantes dos workflows.
 
 ## Dados locais
 
@@ -99,31 +100,17 @@ O runtime, journals e backups ficam em `%LOCALAPPDATA%\GoLiveBypassSafe`.
 
 O log `runtime.log` contem somente horario e codigos de estado como `tor_started`, `tor_ready`, `gateway_routed`, `route_ready` e `route_blocked`. Nao registra URLs, proxies, conta ou sessao.
 
-## Assinatura e Smart App Control
+## Certificado antigo
 
-As releases usam um certificado RSA autoassinado. A chave privada nao e exportavel e permanece somente no computador do mantenedor; a release publica contem apenas o certificado publico.
-
-```text
-Certificado SHA-1: 4960FAD2932D56589F1DADFF3CBEE143FAA9EB35
-Arquivo CER SHA-256: D5D0C0EE02D56A38910CF223A55EDFAA28223AFF8AABF54DCD322F0DB6EB078A
-```
-
-O controller autentica esses valores, importa o certificado exato em `CurrentUser\Root` e `CurrentUser\TrustedPublisher`, valida as assinaturas e exige os hashes exatos de Setup, helper e arvore completa do gerenciador instalado injetados durante o build. Compare os valores acima por outro canal confiavel antes da primeira instalacao.
-
-Esta assinatura autoassinada, embora validada localmente, foi bloqueada pelo Smart App Control em estado `Enforce`. O Windows nao oferece uma excecao por aplicativo. Atualizacoes recentes permitem desativar o SAC temporariamente e ativa-lo novamente sem reinstalar o Windows, conforme a [FAQ atual da Microsoft](https://support.microsoft.com/en-us/windows/smart-app-control-frequently-asked-questions-285ea03d-fa88-4d56-882e-6698afdb7003).
-
-O controller rejeita links e junctions e mantem handles de leitura desde a autenticacao ate o fim. Somente o supervisor assinado e elevado. Ele confirma novamente o estado configurado e a politica SAC efetivamente aplicada, altera temporariamente apenas `Enforce` para `Off` e executa `CiTool.exe --refresh`, conforme o procedimento documentado pela [Microsoft para o Smart App Control](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/app-control-for-business/appcontrol). A confirmacao efetiva exige `VerifiedAndReputableDesktop` ou `VerifiedAndReputableDesktopEvaluation` com `IsEnforced` no resultado de `CiTool.exe --list-policies --json`. Setup e manager sao filhos do controller sem elevacao. Antes de confirmar sucesso, e tambem em falha, timeout ou perda do canal, o supervisor restaura e verifica o estado anterior. A matriz real deve ser validada apenas em VMs descartaveis com SAC. A confianca adicionada permanece somente depois de sucesso. Tambem e possivel alterar o SAC em **Seguranca do Windows > Controle de aplicativos e navegador > Smart App Control**.
-
-O desinstalador restaura o Discord, mas nao remove silenciosamente uma decisao de confianca do Windows. Depois de desinstalar, valide novamente a assinatura do script e remova o certificado com:
+A `v0.2.5` nao usa nem instala certificados. Quem executou a `v0.2.4` pode remover a confianca antiga pelo thumbprint exato:
 
 ```powershell
 $thumb = "4960FAD2932D56589F1DADFF3CBEE143FAA9EB35"
-$sig = Get-AuthenticodeSignature .\Trust-GoLiveBypassSafe.ps1
-if ($sig.Status -ne "Valid" -or $sig.SignerCertificate.Thumbprint -ne $thumb) { throw "Trust script signature mismatch" }
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Trust-GoLiveBypassSafe.ps1 -RemoveTrust
+foreach ($store in @("Cert:\CurrentUser\Root", "Cert:\CurrentUser\TrustedPublisher")) {
+  $entry = Join-Path $store $thumb
+  if (Test-Path -LiteralPath $entry) { Remove-Item -LiteralPath $entry -Force }
+}
 ```
-
-Enquanto esse certificado permanecer confiavel, qualquer codigo futuro assinado pela mesma chave privada tambem sera aceito para esse usuario. Remova-o quando nao precisar mais das releases.
 
 ## Licenca
 

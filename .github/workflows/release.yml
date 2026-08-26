@@ -1,0 +1,231 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      release-tag: ${{ steps.build.outputs.release_tag }}
+      source-commit: ${{ steps.build.outputs.source_commit }}
+      tag-object: ${{ steps.build.outputs.tag_object }}
+      zip-name: ${{ steps.build.outputs.zip_name }}
+      zip-hash: ${{ steps.build.outputs.zip_hash }}
+      zip-size: ${{ steps.build.outputs.zip_size }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.18.0
+          cache: npm
+
+      - name: Pin npm
+        run: npm.cmd install --global npm@11.16.0
+
+      - name: Validate tag and build release
+        id: build
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $package = Get-Content -LiteralPath "package.json" -Raw | ConvertFrom-Json
+          if ($env:RELEASE_TAG -cne "v$($package.version)" -or $env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Tag does not match package.json."
+          }
+          if ((git cat-file -t $env:RELEASE_TAG) -cne "tag") {
+            throw "Release tags must be annotated."
+          }
+          git merge-base --is-ancestor HEAD origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release commit must be reachable from origin/main."
+          }
+          npm.cmd run build:release
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release build failed with exit code $LASTEXITCODE."
+          }
+          $zipName = "GoLiveBypassSafe-$env:RELEASE_TAG.zip"
+          $zip = Join-Path "release" $zipName
+          $sourceCommit = (git rev-parse HEAD).Trim()
+          $tagObject = (git rev-parse "refs/tags/$env:RELEASE_TAG").Trim()
+          $zipHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+          $zipSize = (Get-Item -LiteralPath $zip).Length
+          @(
+            "release_tag=$env:RELEASE_TAG",
+            "source_commit=$sourceCommit",
+            "tag_object=$tagObject",
+            "zip_name=$zipName",
+            "zip_hash=$zipHash",
+            "zip_size=$zipSize"
+          ) | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
+
+      - name: Preserve verified ZIP
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-zip
+          path: release/GoLiveBypassSafe-${{ github.ref_name }}.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+          overwrite: true
+
+  publish:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified ZIP
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-zip
+          path: release
+
+      - name: Publish verified release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.build.outputs.release-tag }}
+          SOURCE_COMMIT: ${{ needs.build.outputs.source-commit }}
+          TAG_OBJECT: ${{ needs.build.outputs.tag-object }}
+          ZIP_NAME: ${{ needs.build.outputs.zip-name }}
+          ZIP_HASH: ${{ needs.build.outputs.zip-hash }}
+          ZIP_SIZE: ${{ needs.build.outputs.zip-size }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+$' -or
+              $env:SOURCE_COMMIT -notmatch '^[0-9a-f]{40}$' -or
+              $env:TAG_OBJECT -notmatch '^[0-9a-f]{40}$' -or
+              $env:ZIP_NAME -cne "GoLiveBypassSafe-$env:RELEASE_TAG.zip" -or
+              $env:ZIP_HASH -notmatch '^[0-9A-F]{64}$' -or
+              $env:ZIP_SIZE -notmatch '^[1-9][0-9]*$') {
+            throw "Build metadata is invalid."
+          }
+
+          function Assert-RemoteTag {
+            $ref = gh api "repos/$env:REPOSITORY/git/ref/tags/$env:RELEASE_TAG" | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0 -or $ref.object.type -cne "tag" -or $ref.object.sha -cne $env:TAG_OBJECT) {
+              throw "Remote annotated tag object changed."
+            }
+            $tag = gh api "repos/$env:REPOSITORY/git/tags/$env:TAG_OBJECT" | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0 -or $tag.object.type -cne "commit" -or $tag.object.sha -cne $env:SOURCE_COMMIT) {
+              throw "Remote release tag no longer identifies the built commit."
+            }
+            $comparison = gh api "repos/$env:REPOSITORY/compare/$env:SOURCE_COMMIT...main" | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0 -or @("ahead", "identical") -cnotcontains $comparison.status) {
+              throw "Release commit is no longer reachable from main."
+            }
+          }
+
+          function Assert-ReleaseAsset([object]$Release, [string]$ZipPath) {
+            $assets = @($Release.assets)
+            if ($Release.isPrerelease -or $assets.Count -ne 1) {
+              throw "Release asset set is invalid."
+            }
+            $asset = $assets[0]
+            if ($asset.state -cne "uploaded" -or
+                $asset.name -cne $env:ZIP_NAME -or
+                [long]$asset.size -ne [long]$env:ZIP_SIZE -or
+                [string]$asset.digest -cne "sha256:$($env:ZIP_HASH.ToLowerInvariant())") {
+              throw "Uploaded release asset does not match the verified ZIP."
+            }
+            if ((Get-FileHash -LiteralPath $ZipPath -Algorithm SHA256).Hash -cne $env:ZIP_HASH -or
+                (Get-Item -LiteralPath $ZipPath).Length -ne [long]$env:ZIP_SIZE) {
+              throw "Downloaded workflow artifact does not match build metadata."
+            }
+          }
+
+          $zip = Join-Path "release" $env:ZIP_NAME
+          Assert-RemoteTag
+          if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -cne $env:ZIP_HASH -or
+              (Get-Item -LiteralPath $zip).Length -ne [long]$env:ZIP_SIZE) {
+            throw "Downloaded workflow artifact does not match build metadata."
+          }
+          $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.md"
+          [IO.File]::WriteAllLines($notesPath, @(
+            "## Instalacao",
+            "",
+            "1. Baixe e extraia ``$env:ZIP_NAME``.",
+            "2. Desligue temporariamente o Smart App Control pela interface Seguranca do Windows.",
+            "3. Se houver uma versao anterior, restaure o Discord pelo manager e desinstale-a.",
+            "4. Execute ``Install-GoLiveBypassSafe.bat`` sem elevacao.",
+            "5. Ligue novamente o Smart App Control depois da confirmacao de sucesso.",
+            "",
+            "ZIP SHA-256: ``$env:ZIP_HASH``",
+            "",
+            "A release e intencionalmente nao assinada. O controller recusa iniciar com o Smart App Control em Enforce ou Evaluation e preserva validacao por hashes, locks e rollback."
+          ), [Text.Encoding]::UTF8)
+
+          $existingJson = gh release view $env:RELEASE_TAG --repo $env:REPOSITORY --json databaseId,isDraft,isPrerelease,assets 2>$null
+          $viewExit = $LASTEXITCODE
+          if ($viewExit -eq 0) {
+            $release = $existingJson | ConvertFrom-Json
+            if (-not $release.isDraft) {
+              Assert-ReleaseAsset $release $zip
+              Write-Host "Existing public release already matches the verified ZIP."
+              exit 0
+            }
+            gh release edit $env:RELEASE_TAG --repo $env:REPOSITORY --draft --verify-tag --title "GoLiveBypass Safe $env:RELEASE_TAG" --notes-file $notesPath
+            if ($LASTEXITCODE -ne 0) {
+              throw "Existing draft could not be refreshed."
+            }
+          } else {
+            gh release create $env:RELEASE_TAG --repo $env:REPOSITORY --draft --verify-tag --title "GoLiveBypass Safe $env:RELEASE_TAG" --notes-file $notesPath
+            if ($LASTEXITCODE -ne 0) {
+              throw "Draft release creation failed."
+            }
+          }
+
+          gh release upload $env:RELEASE_TAG $zip --repo $env:REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release asset upload failed."
+          }
+          $release = gh release view $env:RELEASE_TAG --repo $env:REPOSITORY --json databaseId,isDraft,isPrerelease,assets | ConvertFrom-Json
+          if (-not $release.isDraft) {
+            throw "Release became public before verification completed."
+          }
+          Assert-ReleaseAsset $release $zip
+          Assert-RemoteTag
+          $published = gh api --method PATCH "repos/$env:REPOSITORY/releases/$($release.databaseId)" -F draft=false -f make_latest=legacy | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) {
+            throw "Draft release could not be published."
+          }
+          if ($published.draft -or $published.prerelease) {
+            throw "Published release state is invalid."
+          }
+          try {
+            Assert-RemoteTag
+            Assert-ReleaseAsset $published $zip
+          } catch {
+            $postPublishFailure = $_
+            $redraftJson = gh api --method PATCH "repos/$env:REPOSITORY/releases/$($release.databaseId)" -F draft=true
+            $redraftExit = $LASTEXITCODE
+            $redrafted = $redraftJson | ConvertFrom-Json
+            if ($redraftExit -ne 0 -or $null -eq $redrafted -or -not $redrafted.draft) {
+              throw "Post-publication validation failed and the release could not be returned to draft: $($postPublishFailure.Exception.Message)"
+            }
+            throw $postPublishFailure
+          }

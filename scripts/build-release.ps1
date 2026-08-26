@@ -43,13 +43,20 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $package = Get-Content -LiteralPath (Join-Path $repositoryRoot "package.json") -Raw | ConvertFrom-Json
 $packageLockPath = Join-Path $repositoryRoot "package-lock.json"
 $lockVersions = @(& node.exe -e "const fs=require('fs');const lock=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));console.log(lock.version);console.log(lock.packages[''].version);" $packageLockPath)
-if ($LASTEXITCODE -ne 0 -or $lockVersions.Count -ne 2 -or $package.version -ne "0.2.4" -or $lockVersions[0] -ne $package.version -or $lockVersions[1] -ne $package.version) {
-  throw "package.json and package-lock.json must identify release 0.2.4."
+if ($LASTEXITCODE -ne 0 -or $lockVersions.Count -ne 2 -or $package.version -ne "0.2.5" -or $lockVersions[0] -ne $package.version -or $lockVersions[1] -ne $package.version) {
+  throw "package.json and package-lock.json must identify release 0.2.5."
+}
+if ($package.build.win.signExecutable -ne $false) {
+  throw "The release must disable Windows executable signing explicitly."
+}
+$actualNodeVersion = (& node.exe --version).Trim()
+if ($LASTEXITCODE -ne 0 -or $package.engines.node -ne "24.18.0" -or $actualNodeVersion -ne "v$($package.engines.node)") {
+  throw "The release requires Node.js $($package.engines.node)."
 }
 $expectedNpmVersion = ([string]$package.packageManager).Replace("npm@", "")
 $actualNpmVersion = (& npm.cmd --version).Trim()
 if ($LASTEXITCODE -ne 0 -or $expectedNpmVersion -ne "11.16.0" -or $actualNpmVersion -ne $expectedNpmVersion) {
-  throw "The private release requires npm $expectedNpmVersion."
+  throw "The release requires npm $expectedNpmVersion."
 }
 
 $sourceCommit = (& git.exe -C $repositoryRoot rev-parse HEAD).Trim()
@@ -63,12 +70,12 @@ if ($LASTEXITCODE -ne 0) {
 $sourceState = if ($AllowDirty) { "development" } else { "release" }
 if (-not $AllowDirty) {
   if (-not [string]::IsNullOrEmpty($gitStatus)) {
-    throw "A private release requires a clean Git worktree."
+    throw "A release requires a clean Git worktree."
   }
   $tagName = "v$($package.version)"
   $tagType = (& git.exe -C $repositoryRoot cat-file -t $tagName).Trim()
   if ($LASTEXITCODE -ne 0 -or $tagType -ne "tag") {
-    throw "A private release requires the annotated tag $tagName."
+    throw "A release requires the annotated tag $tagName."
   }
   $tagCommit = (& git.exe -C $repositoryRoot rev-parse "$tagName^{commit}").Trim()
   if ($LASTEXITCODE -ne 0 -or $tagCommit -ne $sourceCommit) {
@@ -90,15 +97,6 @@ $releaseDirectory = Join-Path $repositoryRoot "release"
 if (Test-Path -LiteralPath $releaseDirectory) {
   Remove-Item -LiteralPath $releaseDirectory -Recurse -Force
 }
-$certificatePath = Join-Path $repositoryRoot "certificates\GoLiveBypassSafe.cer"
-$publicCertificate = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certificatePath)
-$signingCertificate = Get-Item -LiteralPath ("Cert:\CurrentUser\My\" + $publicCertificate.Thumbprint)
-if (-not $signingCertificate.HasPrivateKey) {
-  throw "The private release key is unavailable. Run scripts\new-private-signing-certificate.ps1 on the signing machine."
-}
-if (-not (Test-Path -LiteralPath ("Cert:\CurrentUser\Root\" + $publicCertificate.Thumbprint))) {
-  throw "The release certificate is not trusted for verification. Run scripts\new-private-signing-certificate.ps1 and approve the Windows root-certificate confirmation."
-}
 
 & npm.cmd run build:win
 if ($LASTEXITCODE -ne 0) {
@@ -114,52 +112,21 @@ if (-not $AllowDirty) {
 
 $setup = Join-Path $releaseDirectory "GoLiveBypassSafeSetup.exe"
 $unpackedManager = Join-Path $releaseDirectory "win-unpacked\GoLiveBypass Safe.exe"
-$trustScript = Join-Path $releaseDirectory "Trust-GoLiveBypassSafe.ps1"
-$sacHelper = Join-Path $releaseDirectory "Sac-GoLiveBypassSafe.ps1"
+$installerScript = Join-Path $releaseDirectory "Install-GoLiveBypassSafe.ps1"
 $batchInstaller = Join-Path $releaseDirectory "Install-GoLiveBypassSafe.bat"
-$releaseCertificate = Join-Path $releaseDirectory "GoLiveBypassSafe.cer"
 $sourceProvenance = Join-Path $releaseDirectory "SOURCE.txt"
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot "sac-supervisor.ps1") -Destination $sacHelper -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "Install-GoLiveBypassSafe.bat") -Destination $batchInstaller -Force
-Copy-Item -LiteralPath $certificatePath -Destination $releaseCertificate -Force
 
-$helperSignature = Set-AuthenticodeSignature `
-  -LiteralPath $sacHelper `
-  -Certificate $signingCertificate `
-  -HashAlgorithm SHA256 `
-  -IncludeChain All `
-  -TimestampServer "http://timestamp.digicert.com"
-if ($helperSignature.Status -ne "Valid") {
-  throw "The SAC helper signature is not valid: $($helperSignature.StatusMessage)"
-}
-
-$controller = Get-Content -LiteralPath (Join-Path $PSScriptRoot "trust-and-install.ps1") -Raw
+$controller = Get-Content -LiteralPath (Join-Path $PSScriptRoot "install-release.ps1") -Raw
 $controller = $controller.Replace("__RELEASE_VERSION__", [string]$package.version)
 $controller = $controller.Replace("__SOURCE_COMMIT__", $sourceCommit)
 $controller = $controller.Replace("__SOURCE_STATE__", $sourceState)
-$controller = $controller.Replace("__HELPER_SHA256__", (Get-FileHash -LiteralPath $sacHelper -Algorithm SHA256).Hash)
 $controller = $controller.Replace("__SETUP_SHA256__", (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash)
 $controller = $controller.Replace("__MANAGER_TREE_SHA256__", (Get-FileTreeSha256 (Split-Path -Parent $unpackedManager)))
-if ($controller.Contains("__RELEASE_VERSION__") -or $controller.Contains("__SOURCE_COMMIT__") -or $controller.Contains("__SOURCE_STATE__") -or $controller.Contains("__HELPER_SHA256__") -or $controller.Contains("__SETUP_SHA256__") -or $controller.Contains("__MANAGER_TREE_SHA256__")) {
+if ($controller.Contains("__RELEASE_VERSION__") -or $controller.Contains("__SOURCE_COMMIT__") -or $controller.Contains("__SOURCE_STATE__") -or $controller.Contains("__SETUP_SHA256__") -or $controller.Contains("__MANAGER_TREE_SHA256__")) {
   throw "The release controller still contains unresolved build placeholders."
 }
-[IO.File]::WriteAllText($trustScript, $controller, [Text.Encoding]::ASCII)
-$controllerSignature = Set-AuthenticodeSignature `
-  -LiteralPath $trustScript `
-  -Certificate $signingCertificate `
-  -HashAlgorithm SHA256 `
-  -IncludeChain All `
-  -TimestampServer "http://timestamp.digicert.com"
-if ($controllerSignature.Status -ne "Valid") {
-  throw "The trust controller signature is not valid: $($controllerSignature.StatusMessage)"
-}
-
-foreach ($artifact in @($setup, $unpackedManager, $trustScript, $sacHelper)) {
-  $signature = Get-AuthenticodeSignature -LiteralPath $artifact
-  if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Thumbprint -ne $publicCertificate.Thumbprint) {
-    throw "Release artifact '$artifact' does not have the expected valid signature."
-  }
-}
+[IO.File]::WriteAllText($installerScript, $controller, [Text.Encoding]::ASCII)
 
 $manifest = Get-Content -LiteralPath (Join-Path $repositoryRoot "vendor\tor-manifest.json") -Raw | ConvertFrom-Json
 $packagedRuntime = Join-Path $releaseDirectory "win-unpacked\resources\runtime"
@@ -221,12 +188,12 @@ foreach ($expectedFuse in @(
   "commit=$sourceCommit",
   "state=$sourceState"
 ), [Text.Encoding]::ASCII)
-$assets = @($setup, $trustScript, $sacHelper, $batchInstaller, $releaseCertificate, $sourceProvenance)
+$assets = @($setup, $installerScript, $batchInstaller, $sourceProvenance)
 $checksums = $assets | ForEach-Object {
   "{0}  {1}" -f (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash, (Split-Path -Leaf $_)
 }
 $checksumPath = Join-Path $releaseDirectory "SHA256SUMS.txt"
-[System.IO.File]::WriteAllLines($checksumPath, $checksums, [System.Text.Encoding]::ASCII)
+[IO.File]::WriteAllLines($checksumPath, $checksums, [Text.Encoding]::ASCII)
 Remove-Item -LiteralPath (Join-Path $releaseDirectory "win-unpacked") -Recurse -Force
 foreach ($generated in @(".cache", "builder-debug.yml", "builder-effective-config.yaml", "latest.yml", "GoLiveBypassSafeSetup.exe.blockmap")) {
   Remove-Item -LiteralPath (Join-Path $releaseDirectory $generated) -Recurse -Force -ErrorAction SilentlyContinue
@@ -249,7 +216,7 @@ if (-not $AllowDirty) {
   $finalCommit = (& git.exe -C $repositoryRoot rev-parse HEAD).Trim()
   $finalStatus = (& git.exe -C $repositoryRoot status --porcelain=v1 --untracked-files=all) -join "`n"
   if ($LASTEXITCODE -ne 0 -or $finalCommit -ne $sourceCommit -or -not [string]::IsNullOrEmpty($finalStatus)) {
-    throw "The release source changed while artifacts were being verified and signed."
+    throw "The release source changed while artifacts were being verified."
   }
 }
-"Private $sourceState build $($package.version) from $sourceCommit verified with certificate $($publicCertificate.Thumbprint)."
+"Release build $($package.version) from $sourceCommit verified."

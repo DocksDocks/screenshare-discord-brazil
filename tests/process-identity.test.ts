@@ -46,6 +46,13 @@ describe("process identity revalidation", () => {
     expect(childProcessMocks.spawn).not.toHaveBeenCalled();
     expect(childProcessMocks.execFileSync).toHaveBeenCalledTimes(2);
     expect(childProcessMocks.execFileSync.mock.calls[1]?.[2]).toMatchObject({ timeout: 45_000 });
+    const terminationScript = String(
+      (childProcessMocks.execFileSync.mock.calls[1]?.[1] as string[] | undefined)?.[4],
+    );
+    expect(terminationScript).toContain(
+      "FullyQualifiedErrorId -ceq 'NoProcessFoundForGivenId,Microsoft.PowerShell.Commands.GetProcessCommand'",
+    );
+    expect(terminationScript).not.toContain("[Microsoft.PowerShell.Commands.ProcessCommandException]");
   });
 
   it("refuses a reused managed Tor PID immediately before kill", async () => {

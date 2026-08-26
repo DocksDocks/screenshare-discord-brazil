@@ -1,14 +1,14 @@
 {
   "name": "golivebypass-safe",
   "productName": "GoLiveBypass Safe",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Windows-only, Tor-only GoLiveBypass fork with reversible installation",
   "author": "GoLiveBypass Safe contributors",
   "license": "GPL-3.0-only",
   "private": true,
   "packageManager": "npm@11.16.0",
   "engines": {
-    "node": ">=24.0.0",
+    "node": "24.18.0",
     "npm": "11.16.0"
   },
   "type": "module",
@@ -22,8 +22,8 @@
     "compile": "npm run typecheck && npm run compile:electron && vite build",
     "test": "vitest run",
     "verify": "npm run typecheck && npm test",
-    "build:win": "npm run prepare:tor && npm run compile && electron-builder --win --x64 --publish never",
-    "build:private": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-private-release.ps1"
+    "build:win": "npm run prepare:tor && npm run compile && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-nsis.ps1",
+    "build:release": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1"
   },
   "build": {
     "appId": "br.com.golivebypass.safe",
@@ -76,17 +76,7 @@
       "grantFileProtocolExtraPrivileges": true
     },
     "win": {
-      "forceCodeSigning": true,
-      "signExts": [
-        "!tor.exe"
-      ],
-      "signtoolOptions": {
-        "certificateSha1": "4960FAD2932D56589F1DADFF3CBEE143FAA9EB35",
-        "signingHashAlgorithms": [
-          "sha256"
-        ],
-        "rfc3161TimeStampServer": "http://timestamp.digicert.com"
-      },
+      "signExecutable": false,
       "target": [
         {
           "target": "nsis",
