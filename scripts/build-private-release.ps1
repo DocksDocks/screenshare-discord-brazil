@@ -6,12 +6,45 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+function Get-FileTreeSha256([string]$Root) {
+  $rootPath = (Resolve-Path -LiteralPath $Root).Path
+  $pending = New-Object Collections.Generic.Queue[string]
+  $relativePaths = New-Object Collections.Generic.List[string]
+  $pending.Enqueue($rootPath)
+  while ($pending.Count -ne 0) {
+    $directory = $pending.Dequeue()
+    foreach ($item in Get-ChildItem -LiteralPath $directory -Force) {
+      if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "The unpacked manager contains a reparse point."
+      }
+      if ($item.PSIsContainer) {
+        $pending.Enqueue($item.FullName)
+      } else {
+        $relativePaths.Add($item.FullName.Substring($rootPath.Length + 1).Replace("\", "/"))
+      }
+    }
+  }
+  $relativePaths.Sort([StringComparer]::Ordinal)
+  $canonical = New-Object Text.StringBuilder
+  foreach ($relativePath in $relativePaths) {
+    $fileHash = (Get-FileHash -LiteralPath (Join-Path $rootPath $relativePath.Replace("/", "\")) -Algorithm SHA256).Hash
+    [void]$canonical.Append($fileHash).Append("  ").Append($relativePath).Append("`n")
+  }
+  $sha256 = [Security.Cryptography.SHA256]::Create()
+  try {
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($canonical.ToString())
+    return ([BitConverter]::ToString($sha256.ComputeHash($bytes))).Replace("-", "")
+  } finally {
+    $sha256.Dispose()
+  }
+}
+
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $package = Get-Content -LiteralPath (Join-Path $repositoryRoot "package.json") -Raw | ConvertFrom-Json
 $packageLockPath = Join-Path $repositoryRoot "package-lock.json"
 $lockVersions = @(& node.exe -e "const fs=require('fs');const lock=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));console.log(lock.version);console.log(lock.packages[''].version);" $packageLockPath)
-if ($LASTEXITCODE -ne 0 -or $lockVersions.Count -ne 2 -or $package.version -ne "0.2.3" -or $lockVersions[0] -ne $package.version -or $lockVersions[1] -ne $package.version) {
-  throw "package.json and package-lock.json must identify release 0.2.3."
+if ($LASTEXITCODE -ne 0 -or $lockVersions.Count -ne 2 -or $package.version -ne "0.2.4" -or $lockVersions[0] -ne $package.version -or $lockVersions[1] -ne $package.version) {
+  throw "package.json and package-lock.json must identify release 0.2.4."
 }
 $expectedNpmVersion = ([string]$package.packageManager).Replace("npm@", "")
 $actualNpmVersion = (& npm.cmd --version).Trim()
@@ -80,7 +113,7 @@ if (-not $AllowDirty) {
 }
 
 $setup = Join-Path $releaseDirectory "GoLiveBypassSafeSetup.exe"
-$portable = Join-Path $releaseDirectory "GoLiveBypassSafePortable.exe"
+$unpackedManager = Join-Path $releaseDirectory "win-unpacked\GoLiveBypass Safe.exe"
 $trustScript = Join-Path $releaseDirectory "Trust-GoLiveBypassSafe.ps1"
 $sacHelper = Join-Path $releaseDirectory "Sac-GoLiveBypassSafe.ps1"
 $batchInstaller = Join-Path $releaseDirectory "Install-GoLiveBypassSafe.bat"
@@ -106,8 +139,8 @@ $controller = $controller.Replace("__SOURCE_COMMIT__", $sourceCommit)
 $controller = $controller.Replace("__SOURCE_STATE__", $sourceState)
 $controller = $controller.Replace("__HELPER_SHA256__", (Get-FileHash -LiteralPath $sacHelper -Algorithm SHA256).Hash)
 $controller = $controller.Replace("__SETUP_SHA256__", (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash)
-$controller = $controller.Replace("__PORTABLE_SHA256__", (Get-FileHash -LiteralPath $portable -Algorithm SHA256).Hash)
-if ($controller.Contains("__RELEASE_VERSION__") -or $controller.Contains("__SOURCE_COMMIT__") -or $controller.Contains("__SOURCE_STATE__") -or $controller.Contains("__HELPER_SHA256__") -or $controller.Contains("__SETUP_SHA256__") -or $controller.Contains("__PORTABLE_SHA256__")) {
+$controller = $controller.Replace("__MANAGER_TREE_SHA256__", (Get-FileTreeSha256 (Split-Path -Parent $unpackedManager)))
+if ($controller.Contains("__RELEASE_VERSION__") -or $controller.Contains("__SOURCE_COMMIT__") -or $controller.Contains("__SOURCE_STATE__") -or $controller.Contains("__HELPER_SHA256__") -or $controller.Contains("__SETUP_SHA256__") -or $controller.Contains("__MANAGER_TREE_SHA256__")) {
   throw "The release controller still contains unresolved build placeholders."
 }
 [IO.File]::WriteAllText($trustScript, $controller, [Text.Encoding]::ASCII)
@@ -121,8 +154,7 @@ if ($controllerSignature.Status -ne "Valid") {
   throw "The trust controller signature is not valid: $($controllerSignature.StatusMessage)"
 }
 
-$unpackedManager = Join-Path $releaseDirectory "win-unpacked\GoLiveBypass Safe.exe"
-foreach ($artifact in @($setup, $portable, $unpackedManager, $trustScript, $sacHelper)) {
+foreach ($artifact in @($setup, $unpackedManager, $trustScript, $sacHelper)) {
   $signature = Get-AuthenticodeSignature -LiteralPath $artifact
   if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Thumbprint -ne $publicCertificate.Thumbprint) {
     throw "Release artifact '$artifact' does not have the expected valid signature."
@@ -189,7 +221,7 @@ foreach ($expectedFuse in @(
   "commit=$sourceCommit",
   "state=$sourceState"
 ), [Text.Encoding]::ASCII)
-$assets = @($setup, $portable, $trustScript, $sacHelper, $batchInstaller, $releaseCertificate, $sourceProvenance)
+$assets = @($setup, $trustScript, $sacHelper, $batchInstaller, $releaseCertificate, $sourceProvenance)
 $checksums = $assets | ForEach-Object {
   "{0}  {1}" -f (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash, (Split-Path -Leaf $_)
 }
@@ -205,7 +237,10 @@ if ($bundlePath -ne (Join-Path $releaseDirectory $bundleName)) {
   throw "The release bundle was not created at the expected path."
 }
 
-$expectedNames = @($assets | ForEach-Object { Split-Path -Leaf $_ }) + @("SHA256SUMS.txt", $bundleName)
+foreach ($bundledFile in $assets + @($checksumPath)) {
+  Remove-Item -LiteralPath $bundledFile -Force
+}
+$expectedNames = @($bundleName)
 $actualNames = @(Get-ChildItem -LiteralPath $releaseDirectory -Force | ForEach-Object { $_.Name })
 if (@(Compare-Object $expectedNames $actualNames).Count -ne 0) {
   throw "The release directory contains an unexpected artifact set."

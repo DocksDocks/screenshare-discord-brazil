@@ -32,8 +32,9 @@ describe("private release signing", () => {
     expect(script).toContain("Cert:\\CurrentUser\\Root");
     expect(script).toContain("Cert:\\CurrentUser\\TrustedPublisher");
     expect(script).toContain("[switch]$RemoveTrust");
-    expect(script).toContain('Invoke-BoundedProcess $setupPath "/S"');
-    expect(script).toContain('Invoke-BoundedProcess $portablePath "--install-and-exit"');
+    expect(script).toContain("Invoke-BoundedProcess $setupPath ('/S /D={0}' -f $installedManagerRoot)");
+    expect(script).toContain('Invoke-BoundedProcess $installedManagerPath "--install-and-exit"');
+    expect(script).not.toContain("portablePath");
     expect(script).toContain("-Verb RunAs");
     expect(script.match(/-Verb RunAs/g)).toHaveLength(1);
     expect(script).not.toContain("Read-Host");
@@ -93,7 +94,13 @@ describe("private release signing", () => {
     expect(controller).toContain('$commitResponse -ceq "ROLLED_BACK $token"');
     expect(controller).toContain('$commitResponse -ceq "ROLLBACK_READY $token"');
     expect(controller).toContain('$applicationRollbackSafe = $priorSacState -ne "1"');
-    expect(controller).toContain("$portableStarted -and $applicationRollbackSafe");
+    expect(controller).toContain("$managerStarted -and $applicationRollbackSafe");
+    expect(controller).toContain("$applicationRollbackSafe -and $applicationRollbackConfirmed");
+    expect(controller).toContain('$installRegistrySubKey = "Software\\2bab6ef2-82b6-538a-983f-87f4c93796a6"');
+    expect(controller).not.toContain("Uninstall\\2bab6ef2-82b6-538a-983f-87f4c93796a6");
+    expect(controller).toContain("Get-LockedManagerTreeSha256 $installedManagerRoot $installedUninstallerPath");
+    expect(controller).toContain("manager_tree_reparse_point");
+    expect(controller).toContain("$managerRootInitiallyExisted");
     expect(controller).toContain('[Threading.Mutex]::new($true, $cleanupMutexName, [ref]$cleanupMutexCreated)');
     expect(controller).toContain("catch [Threading.AbandonedMutexException]");
     const releaseBeforeCommit = controller.indexOf("Exit-CleanupMutex", controller.indexOf('$stage = "commit"'));
@@ -102,11 +109,30 @@ describe("private release signing", () => {
     expect(releaseBeforeCommit).toBeGreaterThan(controller.indexOf('$stage = "commit"'));
     expect(commitRequest).toBeGreaterThan(releaseBeforeCommit);
     expect(reacquireAfterFailedRestore).toBeGreaterThan(controller.indexOf('$commitResponse -ceq "ROLLBACK_READY $token"'));
-    expect(controller.indexOf('Invoke-BoundedProcess $portablePath "--restore-before-uninstall"')).toBeLessThan(
+    expect(controller.indexOf('Invoke-BoundedProcess $installedManagerPath "--restore-before-uninstall"')).toBeLessThan(
       controller.indexOf("Exit-CleanupMutex", controller.indexOf("} catch {", controller.indexOf("$successRecord"))),
     );
+    const setup = controller.indexOf("Invoke-BoundedProcess $setupPath ('/S /D={0}' -f $installedManagerRoot)");
+    const managerHash = controller.indexOf("Get-LockedManagerTreeSha256 $installedManagerRoot $installedUninstallerPath", setup);
+    const managerSignature = controller.indexOf("Assert-ExpectedSignature $installedManagerPath", managerHash);
+    const managerTreeCheck = controller.indexOf("Assert-ManagerTreeMatchesLocks $installedManagerRoot $installedUninstallerPath", managerSignature);
+    const managerStarted = controller.indexOf("$managerStarted = $true", managerTreeCheck);
+    const managerRun = controller.indexOf('Invoke-BoundedProcess $installedManagerPath "--install-and-exit"', managerStarted);
+    const managerRestore = controller.indexOf('Invoke-BoundedProcess $installedManagerPath "--restore-before-uninstall"');
+    const managerUnlock = controller.indexOf("foreach ($filePath in @($managerTreeLockPaths))", managerRestore);
+    const uninstallerRun = controller.indexOf('Invoke-BoundedProcess $installedUninstallerPath "/S"', managerUnlock);
+    expect(managerHash).toBeGreaterThan(setup);
+    expect(managerSignature).toBeGreaterThan(managerHash);
+    expect(managerTreeCheck).toBeGreaterThan(managerSignature);
+    expect(managerStarted).toBeGreaterThan(managerTreeCheck);
+    expect(managerRun).toBeGreaterThan(managerStarted);
+    expect(managerUnlock).toBeGreaterThan(managerRestore);
+    expect(uninstallerRun).toBeGreaterThan(managerUnlock);
     expect(build).toContain('Replace("__HELPER_SHA256__"');
+    expect(build).toContain('Replace("__MANAGER_TREE_SHA256__"');
+    expect(build).toContain("Get-FileTreeSha256 (Split-Path -Parent $unpackedManager)");
     expect(build).toContain('Replace("__SOURCE_COMMIT__"');
-    expect(build).toContain('$assets = @($setup, $portable, $trustScript, $sacHelper, $batchInstaller, $releaseCertificate, $sourceProvenance)');
+    expect(build).toContain('$assets = @($setup, $trustScript, $sacHelper, $batchInstaller, $releaseCertificate, $sourceProvenance)');
+    expect(build).not.toContain("$portable");
   });
 });

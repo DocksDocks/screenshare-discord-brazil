@@ -13,15 +13,15 @@ describe("Windows packaging", () => {
     const packageJson = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf8"));
     const packageLock = JSON.parse(fs.readFileSync(path.join(projectRoot, "package-lock.json"), "utf8"));
 
-    expect(packageJson.version).toBe("0.2.3");
+    expect(packageJson.version).toBe("0.2.4");
     expect(packageLock.version).toBe(packageJson.version);
     expect(packageLock.packages[""].version).toBe(packageJson.version);
     expect(packageJson.packageManager).toBe("npm@11.16.0");
     expect(packageJson.engines.npm).toBe("11.16.0");
-    expect(packageJson.build.win.target.map(({ target }: { target: string }) => target)).toEqual(["nsis", "portable"]);
+    expect(packageJson.build.win.target.map(({ target }: { target: string }) => target)).toEqual(["nsis"]);
     expect(packageJson.build.nsis.artifactName).toBe("GoLiveBypassSafeSetup.${ext}");
     expect(packageJson.build.nsis.include).toBe("build/installer.nsh");
-    expect(packageJson.build.portable.artifactName).toBe("GoLiveBypassSafePortable.${ext}");
+    expect(packageJson.build.portable).toBeUndefined();
     expect(packageJson.scripts["build:win"]).toContain("--publish never");
   });
 
@@ -31,7 +31,7 @@ describe("Windows packaging", () => {
     expect(build).toContain("[switch]$AllowDirty");
     expect(build).toContain("status --porcelain=v1 --untracked-files=all");
     expect(build).toContain("cat-file -t $tagName");
-    expect(build).toContain('$package.version -ne "0.2.3"');
+    expect(build).toContain('$package.version -ne "0.2.4"');
     expect(build).toContain("npm.cmd ci");
     expect(build).toContain("--dangerously-allow-all-scripts=false");
     expect(build).toContain("npm.cmd run verify");
@@ -46,6 +46,8 @@ describe("Windows packaging", () => {
     expect(build).toContain('create-release-bundle.ps1") -ReleaseDirectory $releaseDirectory');
     expect(build).toContain("The release bundle was not created at the expected path");
     expect(build).toContain('"builder-effective-config.yaml"');
+    expect(build).toContain("$expectedNames = @($bundleName)");
+    expect(build).not.toContain("GoLiveBypassSafePortable.exe");
   });
 
   it("creates the same verified one-download bundle from the same files", () => {
@@ -53,7 +55,6 @@ describe("Windows packaging", () => {
     const script = path.join(projectRoot, "scripts", "create-release-bundle.ps1");
     const names = [
       "GoLiveBypassSafe.cer",
-      "GoLiveBypassSafePortable.exe",
       "GoLiveBypassSafeSetup.exe",
       "Install-GoLiveBypassSafe.bat",
       "Sac-GoLiveBypassSafe.ps1",
@@ -61,11 +62,11 @@ describe("Windows packaging", () => {
       "SOURCE.txt",
       "Trust-GoLiveBypassSafe.ps1",
     ];
-    const bundle = path.join(releaseDirectory, "GoLiveBypassSafe-v0.2.3.zip");
+    const bundle = path.join(releaseDirectory, "GoLiveBypassSafe-v0.2.4.zip");
     const runBundle = () =>
       spawnSync(
         "powershell.exe",
-        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-ReleaseDirectory", releaseDirectory, "-Version", "0.2.3"],
+        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-ReleaseDirectory", releaseDirectory, "-Version", "0.2.4"],
         { encoding: "utf8", windowsHide: true },
       );
     const hash = () => createHash("sha256").update(fs.readFileSync(bundle)).digest("hex");

@@ -13,7 +13,6 @@ $ErrorActionPreference = "Stop"
 $releaseRoot = (Resolve-Path -LiteralPath $ReleaseDirectory).Path
 $inputNames = @(
   "GoLiveBypassSafe.cer",
-  "GoLiveBypassSafePortable.exe",
   "GoLiveBypassSafeSetup.exe",
   "Install-GoLiveBypassSafe.bat",
   "Sac-GoLiveBypassSafe.ps1",

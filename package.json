@@ -1,7 +1,7 @@
 {
   "name": "golivebypass-safe",
   "productName": "GoLiveBypass Safe",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Windows-only, Tor-only GoLiveBypass fork with reversible installation",
   "author": "GoLiveBypass Safe contributors",
   "license": "GPL-3.0-only",
@@ -93,12 +93,6 @@
           "arch": [
             "x64"
           ]
-        },
-        {
-          "target": "portable",
-          "arch": [
-            "x64"
-          ]
         }
       ]
     },
@@ -112,9 +106,6 @@
       "artifactName": "GoLiveBypassSafeSetup.${ext}",
       "include": "build/installer.nsh",
       "deleteAppDataOnUninstall": false
-    },
-    "portable": {
-      "artifactName": "GoLiveBypassSafePortable.${ext}"
     }
   },
   "devDependencies": {

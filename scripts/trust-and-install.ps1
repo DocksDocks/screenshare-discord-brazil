@@ -12,7 +12,8 @@ $sourceCommit = "__SOURCE_COMMIT__"
 $sourceState = "__SOURCE_STATE__"
 $expectedHelperSha256 = "__HELPER_SHA256__"
 $expectedSetupSha256 = "__SETUP_SHA256__"
-$expectedPortableSha256 = "__PORTABLE_SHA256__"
+$expectedManagerTreeSha256 = "__MANAGER_TREE_SHA256__"
+$installRegistrySubKey = "Software\2bab6ef2-82b6-538a-983f-87f4c93796a6"
 $sacRegistrySubKey = "SYSTEM\CurrentControlSet\Control\CI\Policy"
 $sacRegistryValue = "VerifiedAndReputablePolicyState"
 $helperTimeoutSeconds = 600
@@ -57,6 +58,120 @@ function Assert-ExpectedSignature([string]$Path) {
       $null -eq $signature.SignerCertificate -or
       $signature.SignerCertificate.Thumbprint -cne $expectedThumbprint) {
     throw "signature_mismatch"
+  }
+}
+
+function Get-RegisteredManagerPaths {
+  $result = $null
+  foreach ($view in @([Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryView]::Registry32)) {
+    $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::CurrentUser, $view)
+    $key = $null
+    try {
+      $key = $baseKey.OpenSubKey($installRegistrySubKey, $false)
+      if ($null -eq $key) {
+        continue
+      }
+      if (-not (@($key.GetValueNames()) -ccontains "InstallLocation") -or
+          $key.GetValueKind("InstallLocation") -ne [Microsoft.Win32.RegistryValueKind]::String) {
+        throw "manager_registration_invalid"
+      }
+      $installRoot = [string]$key.GetValue("InstallLocation", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+      if ([string]::IsNullOrWhiteSpace($installRoot) -or $installRoot -notmatch '^[A-Za-z]:\\') {
+        throw "manager_registration_invalid"
+      }
+      $candidate = [pscustomobject]@{
+        ManagerPath = [IO.Path]::GetFullPath((Join-Path $installRoot "GoLiveBypass Safe.exe"))
+        UninstallerPath = [IO.Path]::GetFullPath((Join-Path $installRoot "Uninstall GoLiveBypass Safe.exe"))
+      }
+      if ($null -eq $result) {
+        $result = $candidate
+      } elseif (-not [StringComparer]::OrdinalIgnoreCase.Equals($result.ManagerPath, $candidate.ManagerPath) -or
+                -not [StringComparer]::OrdinalIgnoreCase.Equals($result.UninstallerPath, $candidate.UninstallerPath)) {
+        throw "manager_registration_ambiguous"
+      }
+    } finally {
+      if ($null -ne $key) {
+        $key.Dispose()
+      }
+      $baseKey.Dispose()
+    }
+  }
+  return $result
+}
+
+function Get-LockedManagerTreeSha256([string]$Root, [string]$UninstallerPath) {
+  $rootPath = [IO.Path]::GetFullPath($Root)
+  $pending = New-Object Collections.Generic.Queue[string]
+  $relativePaths = New-Object Collections.Generic.List[string]
+  $newLocks = New-Object Collections.Generic.List[string]
+  $pending.Enqueue($rootPath)
+  try {
+    while ($pending.Count -ne 0) {
+      $directory = $pending.Dequeue()
+      foreach ($item in Get-ChildItem -LiteralPath $directory -Force) {
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+          throw "manager_tree_reparse_point"
+        }
+        if ($item.PSIsContainer) {
+          $pending.Enqueue($item.FullName)
+        } elseif (-not [StringComparer]::OrdinalIgnoreCase.Equals($item.FullName, $UninstallerPath)) {
+          $relativePaths.Add($item.FullName.Substring($rootPath.Length + 1).Replace("\", "/"))
+        }
+      }
+    }
+    $relativePaths.Sort([StringComparer]::Ordinal)
+    $canonical = New-Object Text.StringBuilder
+    foreach ($relativePath in $relativePaths) {
+      $filePath = [IO.Path]::GetFullPath((Join-Path $rootPath $relativePath.Replace("/", "\")))
+      $locks[$filePath] = [IO.File]::Open($filePath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+      $newLocks.Add($filePath)
+      $script:managerTreeLockPaths.Add($filePath)
+      $fileHash = Get-LockedSha256 $locks[$filePath]
+      [void]$canonical.Append($fileHash).Append("  ").Append($relativePath).Append("`n")
+    }
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+      $bytes = [Text.UTF8Encoding]::new($false).GetBytes($canonical.ToString())
+      return ([BitConverter]::ToString($sha256.ComputeHash($bytes))).Replace("-", "")
+    } finally {
+      $sha256.Dispose()
+    }
+  } catch {
+    foreach ($filePath in $newLocks) {
+      $locks[$filePath].Dispose()
+      [void]$locks.Remove($filePath)
+      [void]$script:managerTreeLockPaths.Remove($filePath)
+    }
+    throw
+  }
+}
+
+function Assert-ManagerTreeMatchesLocks([string]$Root, [string]$UninstallerPath) {
+  $rootPath = [IO.Path]::GetFullPath($Root)
+  $pending = New-Object Collections.Generic.Queue[string]
+  $actualPaths = New-Object Collections.Generic.List[string]
+  $pending.Enqueue($rootPath)
+  while ($pending.Count -ne 0) {
+    $directory = $pending.Dequeue()
+    foreach ($item in Get-ChildItem -LiteralPath $directory -Force) {
+      if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "manager_tree_reparse_point"
+      }
+      if ($item.PSIsContainer) {
+        $pending.Enqueue($item.FullName)
+      } elseif (-not [StringComparer]::OrdinalIgnoreCase.Equals($item.FullName, $UninstallerPath)) {
+        $actualPaths.Add($item.FullName)
+      }
+    }
+  }
+  $actualPaths.Sort([StringComparer]::OrdinalIgnoreCase)
+  $expectedPaths = New-Object Collections.Generic.List[string]
+  foreach ($filePath in $managerTreeLockPaths) {
+    $expectedPaths.Add($filePath)
+  }
+  $expectedPaths.Sort([StringComparer]::OrdinalIgnoreCase)
+  if (($actualPaths -join "`n") -cne ($expectedPaths -join "`n")) {
+    throw "manager_tree_changed"
   }
 }
 
@@ -202,8 +317,14 @@ function Stop-ProcessTree([hashtable]$KnownProcesses) {
   throw "process_tree_termination_unconfirmed"
 }
 
-function Invoke-BoundedProcess([string]$Path, [string]$Arguments, [int]$TimeoutSeconds) {
-  $process = Start-Process -FilePath $Path -ArgumentList $Arguments -PassThru
+function Invoke-BoundedProcess([string]$Path, [string]$Arguments, [int]$TimeoutSeconds, [IO.FileStream]$LaunchLock = $null) {
+  try {
+    $process = Start-Process -FilePath $Path -ArgumentList $Arguments -PassThru
+  } finally {
+    if ($null -ne $LaunchLock) {
+      $LaunchLock.Dispose()
+    }
+  }
   $knownProcesses = @{
     $process.Id = ([DateTimeOffset]$process.StartTime).ToUnixTimeMilliseconds()
   }
@@ -246,6 +367,7 @@ function Remove-AddedTrust([string[]]$Stores) {
 }
 
 $locks = @{}
+$managerTreeLockPaths = New-Object Collections.Generic.List[string]
 $addedStores = New-Object Collections.Generic.List[string]
 $listener = $null
 $client = $null
@@ -267,11 +389,11 @@ $applicationRollbackSafe = $true
 $sacRollbackAcknowledged = $false
 $helperCouldChangeSac = $false
 $setupStarted = $false
-$portableStarted = $false
+$managerStarted = $false
 $managerInitiallyInstalled = $false
-$installedManagerRoot = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)) "Programs\golivebypass-safe"
-$installedManagerPath = Join-Path $installedManagerRoot "GoLiveBypass Safe.exe"
-$installedUninstallerPath = Join-Path $installedManagerRoot "Uninstall GoLiveBypass Safe.exe"
+$managerRootInitiallyExisted = $false
+$installedManagerPath = $null
+$installedUninstallerPath = $null
 
 try {
   $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -286,8 +408,7 @@ try {
   if (-not $RemoveTrust) {
     $helperPath = Assert-RegularFileWithoutReparsePoints (Join-Path $PSScriptRoot "Sac-GoLiveBypassSafe.ps1")
     $setupPath = Assert-RegularFileWithoutReparsePoints (Join-Path $PSScriptRoot "GoLiveBypassSafeSetup.exe")
-    $portablePath = Assert-RegularFileWithoutReparsePoints (Join-Path $PSScriptRoot "GoLiveBypassSafePortable.exe")
-    $pathsToLock += @($helperPath, $setupPath, $portablePath)
+    $pathsToLock += @($helperPath, $setupPath)
   }
   foreach ($path in $pathsToLock) {
     $locks[$path] = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
@@ -343,7 +464,7 @@ try {
         $sourceState -eq "__SOURCE_STATE__" -or
         $expectedHelperSha256 -eq "__HELPER_SHA256__" -or
         $expectedSetupSha256 -eq "__SETUP_SHA256__" -or
-        $expectedPortableSha256 -eq "__PORTABLE_SHA256__") {
+        $expectedManagerTreeSha256 -eq "__MANAGER_TREE_SHA256__") {
       throw "unresolved_build_placeholder"
     }
     if ($releaseVersion -notmatch '^\d+\.\d+\.\d+$' -or
@@ -351,7 +472,7 @@ try {
         @("release", "development") -cnotcontains $sourceState -or
         $expectedHelperSha256 -notmatch '^[0-9A-F]{64}$' -or
         $expectedSetupSha256 -notmatch '^[0-9A-F]{64}$' -or
-        $expectedPortableSha256 -notmatch '^[0-9A-F]{64}$') {
+        $expectedManagerTreeSha256 -notmatch '^[0-9A-F]{64}$') {
       throw "invalid_build_value"
     }
 
@@ -372,12 +493,21 @@ try {
     Assert-ExpectedSignature $controllerPath
     Assert-ExpectedSignature $helperPath
     Assert-ExpectedSignature $setupPath
-    Assert-ExpectedSignature $portablePath
     if ((Get-LockedSha256 $locks[$helperPath]) -cne $expectedHelperSha256 -or
-        (Get-LockedSha256 $locks[$setupPath]) -cne $expectedSetupSha256 -or
-        (Get-LockedSha256 $locks[$portablePath]) -cne $expectedPortableSha256) {
+        (Get-LockedSha256 $locks[$setupPath]) -cne $expectedSetupSha256) {
       throw "artifact_hash_mismatch"
     }
+    $registeredManager = Get-RegisteredManagerPaths
+    if ($null -ne $registeredManager) {
+      $installedManagerPath = $registeredManager.ManagerPath
+      $installedUninstallerPath = $registeredManager.UninstallerPath
+    } else {
+      $installedManagerRoot = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)) "Programs\golivebypass-safe"
+      $installedManagerPath = Join-Path $installedManagerRoot "GoLiveBypass Safe.exe"
+      $installedUninstallerPath = Join-Path $installedManagerRoot "Uninstall GoLiveBypass Safe.exe"
+    }
+    $installedManagerRoot = [IO.Path]::GetFullPath((Split-Path -Parent $installedManagerPath))
+    $managerRootInitiallyExisted = Test-Path -LiteralPath $installedManagerRoot
     $managerInitiallyInstalled = (Test-Path -LiteralPath $installedManagerPath) -or (Test-Path -LiteralPath $installedUninstallerPath)
 
     $stage = "sac_read"
@@ -441,10 +571,28 @@ try {
 
     $stage = "setup"
     $setupStarted = $true
-    Invoke-BoundedProcess $setupPath "/S" $applicationTimeoutSeconds
-    $stage = "portable"
-    $portableStarted = $true
-    Invoke-BoundedProcess $portablePath "--install-and-exit" $applicationTimeoutSeconds
+    Invoke-BoundedProcess $setupPath ('/S /D={0}' -f $installedManagerRoot) $applicationTimeoutSeconds
+    $stage = "manager_authentication"
+    $registeredManager = Get-RegisteredManagerPaths
+    if ($null -eq $registeredManager) {
+      throw "manager_registration_missing"
+    }
+    if (-not [StringComparer]::OrdinalIgnoreCase.Equals($registeredManager.ManagerPath, $installedManagerPath) -or
+        -not [StringComparer]::OrdinalIgnoreCase.Equals($registeredManager.UninstallerPath, $installedUninstallerPath)) {
+      throw "manager_registration_mismatch"
+    }
+    $installedManagerPath = Assert-RegularFileWithoutReparsePoints $registeredManager.ManagerPath
+    $installedUninstallerPath = $registeredManager.UninstallerPath
+    $installedManagerRoot = Split-Path -Parent $installedManagerPath
+    $managerTreeSha256 = Get-LockedManagerTreeSha256 $installedManagerRoot $installedUninstallerPath
+    Assert-ExpectedSignature $installedManagerPath
+    if ($managerTreeSha256 -cne $expectedManagerTreeSha256) {
+      throw "manager_tree_hash_mismatch"
+    }
+    $stage = "manager"
+    Assert-ManagerTreeMatchesLocks $installedManagerRoot $installedUninstallerPath
+    $managerStarted = $true
+    Invoke-BoundedProcess $installedManagerPath "--install-and-exit" $applicationTimeoutSeconds
 
     $stage = "commit"
     $applicationRollbackSafe = $priorSacState -ne "1"
@@ -475,25 +623,75 @@ try {
 } catch {
   $failure = $_
   $failureStage = $stage
-  if ($portableStarted -and $applicationRollbackSafe) {
+  if ($managerStarted -and $applicationRollbackSafe) {
     try {
       $stage = "application_restore"
-      Invoke-BoundedProcess $portablePath "--restore-before-uninstall" $cleanupTimeoutSeconds
+      Assert-ManagerTreeMatchesLocks $installedManagerRoot $installedUninstallerPath
+      Invoke-BoundedProcess $installedManagerPath "--restore-before-uninstall" $cleanupTimeoutSeconds
     } catch {
       $applicationRollbackConfirmed = $false
     }
-  } elseif ($portableStarted) {
+  } elseif ($managerStarted) {
     $applicationRollbackConfirmed = $false
   }
-  if ($setupStarted -and -not $managerInitiallyInstalled -and $applicationRollbackSafe) {
+  if ($setupStarted -and -not $managerInitiallyInstalled -and -not $managerRootInitiallyExisted -and $applicationRollbackSafe -and $applicationRollbackConfirmed) {
     try {
       $stage = "manager_cleanup"
+      foreach ($filePath in @($managerTreeLockPaths)) {
+        $locks[$filePath].Dispose()
+        [void]$locks.Remove($filePath)
+      }
+      $managerTreeLockPaths.Clear()
+      $uninstallerCleanupFailed = $false
       if (Test-Path -LiteralPath $installedUninstallerPath) {
-        $installedUninstallerPath = Assert-RegularFileWithoutReparsePoints $installedUninstallerPath
-        Assert-ExpectedSignature $installedUninstallerPath
-        Invoke-BoundedProcess $installedUninstallerPath "/S" $cleanupTimeoutSeconds
+        try {
+          $installedUninstallerPath = Assert-RegularFileWithoutReparsePoints $installedUninstallerPath
+          $uninstallerLock = [IO.File]::Open($installedUninstallerPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+          try {
+            Assert-ExpectedSignature $installedUninstallerPath
+            Invoke-BoundedProcess $installedUninstallerPath "/S" $cleanupTimeoutSeconds $uninstallerLock
+            $uninstallerLock = $null
+          } finally {
+            if ($null -ne $uninstallerLock) {
+              $uninstallerLock.Dispose()
+            }
+          }
+        } catch {
+          $uninstallerCleanupFailed = $true
+        }
+      }
+      if (Test-Path -LiteralPath $installedManagerRoot) {
+        $current = $installedManagerRoot
+        while ($true) {
+          $item = Get-Item -LiteralPath $current -Force
+          if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "manager_cleanup_reparse_point"
+          }
+          $parent = [IO.Directory]::GetParent($current)
+          if ($null -eq $parent) {
+            break
+          }
+          $current = $parent.FullName
+        }
+        $pending = New-Object Collections.Generic.Queue[string]
+        $pending.Enqueue($installedManagerRoot)
+        while ($pending.Count -ne 0) {
+          $directory = $pending.Dequeue()
+          foreach ($item in Get-ChildItem -LiteralPath $directory -Force) {
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw "manager_cleanup_reparse_point"
+            }
+            if ($item.PSIsContainer) {
+              $pending.Enqueue($item.FullName)
+            }
+          }
+        }
+        Remove-Item -LiteralPath $installedManagerRoot -Recurse -Force
       }
       if ((Test-Path -LiteralPath $installedManagerPath) -or (Test-Path -LiteralPath $installedUninstallerPath)) {
+        $applicationRollbackConfirmed = $false
+      }
+      if ($uninstallerCleanupFailed) {
         $applicationRollbackConfirmed = $false
       }
     } catch {
