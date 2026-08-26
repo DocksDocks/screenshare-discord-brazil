@@ -10,6 +10,17 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+function Get-FileSha256([string]$Path) {
+  $stream = [IO.File]::OpenRead($Path)
+  $sha256 = [Security.Cryptography.SHA256]::Create()
+  try {
+    return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace("-", "")
+  } finally {
+    $sha256.Dispose()
+    $stream.Dispose()
+  }
+}
+
 $releaseRoot = (Resolve-Path -LiteralPath $ReleaseDirectory).Path
 $inputNames = @(
   "GoLiveBypassSafeSetup.exe",
@@ -76,7 +87,7 @@ try {
         $sha256.Dispose()
         $entryStream.Dispose()
       }
-      if ($entryHash -cne (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash) {
+      if ($entryHash -cne (Get-FileSha256 $file)) {
         throw "The release bundle entry for '$file' does not match its source."
       }
     }

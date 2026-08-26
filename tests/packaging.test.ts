@@ -29,6 +29,7 @@ describe("Windows packaging", () => {
 
   it("gates releases on source provenance and verifies final packaged state", () => {
     const build = fs.readFileSync(path.join(projectRoot, "scripts", "build-release.ps1"), "utf8");
+    const bundle = fs.readFileSync(path.join(projectRoot, "scripts", "create-release-bundle.ps1"), "utf8");
 
     expect(build).toContain("[switch]$AllowDirty");
     expect(build).toContain("status --porcelain=v1 --untracked-files=all");
@@ -49,6 +50,8 @@ describe("Windows packaging", () => {
     expect(build).toContain("The release bundle was not created at the expected path");
     expect(build).toContain('"builder-effective-config.yaml"');
     expect(build).toContain("$expectedNames = @($bundleName)");
+    expect(build).not.toContain("Get-FileHash");
+    expect(bundle).not.toContain("Get-FileHash");
     expect(build).not.toContain("GoLiveBypassSafePortable.exe");
   });
 
@@ -135,8 +138,10 @@ describe("Windows packaging", () => {
   });
 
   it("keeps CI read-only and isolates tag release permissions", () => {
-    const ci = fs.readFileSync(path.join(projectRoot, ".github", "workflows", "ci.yml"), "utf8");
-    const release = fs.readFileSync(path.join(projectRoot, ".github", "workflows", "release.yml"), "utf8");
+    const ci = fs.readFileSync(path.join(projectRoot, ".github", "workflows", "ci.yml"), "utf8").replaceAll("\r\n", "\n");
+    const release = fs
+      .readFileSync(path.join(projectRoot, ".github", "workflows", "release.yml"), "utf8")
+      .replaceAll("\r\n", "\n");
     const actionReferences = (workflow: string) =>
       [...workflow.matchAll(/^\s*uses:\s+([^\s#]+)/gm)].map((match) => match[1]);
     const expectedCiActions = [

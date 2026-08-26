@@ -6,6 +6,17 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+function Get-FileSha256([string]$Path) {
+  $stream = [IO.File]::OpenRead($Path)
+  $sha256 = [Security.Cryptography.SHA256]::Create()
+  try {
+    return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace("-", "")
+  } finally {
+    $sha256.Dispose()
+    $stream.Dispose()
+  }
+}
+
 function Get-FileTreeSha256([string]$Root) {
   $rootPath = (Resolve-Path -LiteralPath $Root).Path
   $pending = New-Object Collections.Generic.Queue[string]
@@ -27,7 +38,7 @@ function Get-FileTreeSha256([string]$Root) {
   $relativePaths.Sort([StringComparer]::Ordinal)
   $canonical = New-Object Text.StringBuilder
   foreach ($relativePath in $relativePaths) {
-    $fileHash = (Get-FileHash -LiteralPath (Join-Path $rootPath $relativePath.Replace("/", "\")) -Algorithm SHA256).Hash
+    $fileHash = Get-FileSha256 (Join-Path $rootPath $relativePath.Replace("/", "\"))
     [void]$canonical.Append($fileHash).Append("  ").Append($relativePath).Append("`n")
   }
   $sha256 = [Security.Cryptography.SHA256]::Create()
@@ -121,7 +132,7 @@ $controller = Get-Content -LiteralPath (Join-Path $PSScriptRoot "install-release
 $controller = $controller.Replace("__RELEASE_VERSION__", [string]$package.version)
 $controller = $controller.Replace("__SOURCE_COMMIT__", $sourceCommit)
 $controller = $controller.Replace("__SOURCE_STATE__", $sourceState)
-$controller = $controller.Replace("__SETUP_SHA256__", (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash)
+$controller = $controller.Replace("__SETUP_SHA256__", (Get-FileSha256 $setup))
 $controller = $controller.Replace("__MANAGER_TREE_SHA256__", (Get-FileTreeSha256 (Split-Path -Parent $unpackedManager)))
 if ($controller.Contains("__RELEASE_VERSION__") -or $controller.Contains("__SOURCE_COMMIT__") -or $controller.Contains("__SOURCE_STATE__") -or $controller.Contains("__SETUP_SHA256__") -or $controller.Contains("__MANAGER_TREE_SHA256__")) {
   throw "The release controller still contains unresolved build placeholders."
@@ -133,13 +144,13 @@ $packagedRuntime = Join-Path $releaseDirectory "win-unpacked\resources\runtime"
 foreach ($name in @("gateway-relay.cjs", "payload.cjs", "proxy.pac", "runtime-safety.cjs")) {
   $sourceFile = Join-Path $repositoryRoot "runtime\$name"
   $packagedFile = Join-Path $packagedRuntime $name
-  if ((Get-FileHash -LiteralPath $sourceFile -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $packagedFile -Algorithm SHA256).Hash) {
+  if ((Get-FileSha256 $sourceFile) -ne (Get-FileSha256 $packagedFile)) {
     throw "The packaged runtime file '$name' no longer matches its source."
   }
 }
 $sourceManifest = Join-Path $repositoryRoot "vendor\tor-manifest.json"
 $packagedManifest = Join-Path $packagedRuntime "tor-manifest.json"
-if ((Get-FileHash -LiteralPath $sourceManifest -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $packagedManifest -Algorithm SHA256).Hash) {
+if ((Get-FileSha256 $sourceManifest) -ne (Get-FileSha256 $packagedManifest)) {
   throw "The packaged Tor manifest no longer matches its source."
 }
 $packagedTorRoot = Join-Path $packagedRuntime "tor"
@@ -155,7 +166,7 @@ if (@(Compare-Object $listedTorFiles $actualTorFiles).Count -ne 0) {
 }
 foreach ($property in $manifest.files.PSObject.Properties) {
   $packagedFile = Join-Path $packagedTorRoot $property.Name.Replace("/", "\")
-  if ((Get-FileHash -LiteralPath $packagedFile -Algorithm SHA256).Hash.ToLowerInvariant() -ne $property.Value) {
+  if ((Get-FileSha256 $packagedFile).ToLowerInvariant() -ne $property.Value) {
     throw "The packaged Tor file '$($property.Name)' no longer matches the manifest."
   }
 }
@@ -190,7 +201,7 @@ foreach ($expectedFuse in @(
 ), [Text.Encoding]::ASCII)
 $assets = @($setup, $installerScript, $batchInstaller, $sourceProvenance)
 $checksums = $assets | ForEach-Object {
-  "{0}  {1}" -f (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash, (Split-Path -Leaf $_)
+  "{0}  {1}" -f (Get-FileSha256 $_), (Split-Path -Leaf $_)
 }
 $checksumPath = Join-Path $releaseDirectory "SHA256SUMS.txt"
 [IO.File]::WriteAllLines($checksumPath, $checksums, [Text.Encoding]::ASCII)

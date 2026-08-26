@@ -19,7 +19,7 @@ export const INSTALL_PHASES = ["planned", "backed_up", "staged", "original_moved
 const temporaryDirectories: string[] = [];
 
 export function temporaryDirectory(): string {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "golive-safe-test-"));
+  const directory = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "golive-safe-test-")));
   temporaryDirectories.push(directory);
   return directory;
 }
