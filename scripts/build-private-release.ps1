@@ -196,7 +196,7 @@ $checksums = $assets | ForEach-Object {
 $checksumPath = Join-Path $releaseDirectory "SHA256SUMS.txt"
 [System.IO.File]::WriteAllLines($checksumPath, $checksums, [System.Text.Encoding]::ASCII)
 Remove-Item -LiteralPath (Join-Path $releaseDirectory "win-unpacked") -Recurse -Force
-foreach ($generated in @(".cache", "builder-debug.yml", "latest.yml", "GoLiveBypassSafeSetup.exe.blockmap")) {
+foreach ($generated in @(".cache", "builder-debug.yml", "builder-effective-config.yaml", "latest.yml", "GoLiveBypassSafeSetup.exe.blockmap")) {
   Remove-Item -LiteralPath (Join-Path $releaseDirectory $generated) -Recurse -Force -ErrorAction SilentlyContinue
 }
 $bundleName = "GoLiveBypassSafe-v$($package.version).zip"

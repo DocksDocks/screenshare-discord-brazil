@@ -45,6 +45,7 @@ describe("Windows packaging", () => {
     expect(build).toContain('$bundleName = "GoLiveBypassSafe-v$($package.version).zip"');
     expect(build).toContain('create-release-bundle.ps1") -ReleaseDirectory $releaseDirectory');
     expect(build).toContain("The release bundle was not created at the expected path");
+    expect(build).toContain('"builder-effective-config.yaml"');
   });
 
   it("creates the same verified one-download bundle from the same files", () => {
