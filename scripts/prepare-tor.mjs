@@ -12,7 +12,6 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -102,7 +101,7 @@ if (existingBundleIsValid()) {
 }
 
 mkdirSync(vendorRoot, { recursive: true });
-const work = mkdtempSync(join(tmpdir(), "golivebypass-tor-"));
+const work = mkdtempSync(join(vendorRoot, ".golivebypass-tor-"));
 const archivePath = join(work, basename(SOURCE));
 const extractRoot = join(work, "extract");
 mkdirSync(extractRoot);

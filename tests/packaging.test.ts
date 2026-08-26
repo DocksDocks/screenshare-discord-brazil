@@ -30,6 +30,8 @@ describe("Windows packaging", () => {
   it("gates releases on source provenance and verifies final packaged state", () => {
     const build = fs.readFileSync(path.join(projectRoot, "scripts", "build-release.ps1"), "utf8");
     const bundle = fs.readFileSync(path.join(projectRoot, "scripts", "create-release-bundle.ps1"), "utf8");
+    const prepareTor = fs.readFileSync(path.join(projectRoot, "scripts", "prepare-tor.mjs"), "utf8");
+    const gitignore = fs.readFileSync(path.join(projectRoot, ".gitignore"), "utf8");
 
     expect(build).toContain("[switch]$AllowDirty");
     expect(build).toContain("status --porcelain=v1 --untracked-files=all");
@@ -52,6 +54,9 @@ describe("Windows packaging", () => {
     expect(build).toContain("$expectedNames = @($bundleName)");
     expect(build).not.toContain("Get-FileHash");
     expect(bundle).not.toContain("Get-FileHash");
+    expect(prepareTor).toContain('mkdtempSync(join(vendorRoot, ".golivebypass-tor-"))');
+    expect(prepareTor).not.toContain("tmpdir()");
+    expect(gitignore).toContain("vendor/.golivebypass-tor-*/");
     expect(build).not.toContain("GoLiveBypassSafePortable.exe");
   });
 
