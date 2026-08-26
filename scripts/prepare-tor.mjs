@@ -15,6 +15,7 @@ import {
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { writeManifestIfChanged } from "./tor-manifest.mjs";
 
 const VERSION = "15.0.20";
 const ARCHIVE = `tor-expert-bundle-windows-x86_64-${VERSION}.tar.gz`;
@@ -154,10 +155,8 @@ try {
 
   rmSync(torRoot, { recursive: true, force: true });
   renameSync(extractRoot, torRoot);
-  writeFileSync(
-    manifestPath,
-    `${JSON.stringify({ schema: 1, version: VERSION, source: SOURCE, archiveSha256: ARCHIVE_SHA256, files }, null, 2)}\n`,
-  );
+  const serializedManifest = `${JSON.stringify({ schema: 1, version: VERSION, source: SOURCE, archiveSha256: ARCHIVE_SHA256, files }, null, 2)}\n`;
+  writeManifestIfChanged(manifestPath, serializedManifest);
   console.log(`[tor] prepared ${Object.keys(files).length} verified files`);
 } finally {
   rmSync(work, { recursive: true, force: true });

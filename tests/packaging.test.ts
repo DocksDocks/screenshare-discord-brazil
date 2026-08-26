@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { writeManifestIfChanged } from "../scripts/tor-manifest.mjs";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -56,8 +57,28 @@ describe("Windows packaging", () => {
     expect(bundle).not.toContain("Get-FileHash");
     expect(prepareTor).toContain('mkdtempSync(join(vendorRoot, ".golivebypass-tor-"))');
     expect(prepareTor).not.toContain("tmpdir()");
+    expect(prepareTor).toContain("writeManifestIfChanged(manifestPath, serializedManifest)");
     expect(gitignore).toContain("vendor/.golivebypass-tor-*/");
     expect(build).not.toContain("GoLiveBypassSafePortable.exe");
+  });
+
+  it("preserves an equivalent checked-out Tor manifest and replaces stale content", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "golive-tor-manifest-"));
+    const manifest = path.join(root, "tor-manifest.json");
+    const serialized = '{\n  "schema": 1\n}\n';
+    const checkedOut = serialized.replaceAll("\n", "\r\n");
+
+    try {
+      fs.writeFileSync(manifest, checkedOut);
+      writeManifestIfChanged(manifest, serialized);
+      expect(fs.readFileSync(manifest, "utf8")).toBe(checkedOut);
+
+      fs.writeFileSync(manifest, "stale\r\n");
+      writeManifestIfChanged(manifest, serialized);
+      expect(fs.readFileSync(manifest, "utf8")).toBe(serialized);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("creates the same verified one-download bundle from the same files", () => {

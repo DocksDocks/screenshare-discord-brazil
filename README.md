@@ -62,7 +62,7 @@ https://archive.torproject.org/tor-package-archive/torbrowser/15.0.20/tor-expert
 SHA-256 d59bff934e3ad876e1623e24ae60c19aeea56f50178093b9f86fba230639f949
 ```
 
-O hash corresponde ao `sha256sums-unsigned-build.txt` publicado pelo Tor Project para a versao 15.0.20. O script extrai somente `tor.exe`, GeoIP, configuracao padrao e avisos de licenca. O staging fica sob `vendor` para que a arvore verificada seja promovida atomicamente no mesmo volume. Os transportes plugaveis nao sao empacotados.
+O hash corresponde ao `sha256sums-unsigned-build.txt` publicado pelo Tor Project para a versao 15.0.20. O script extrai somente `tor.exe`, GeoIP, configuracao padrao e avisos de licenca. O staging fica sob `vendor` para que a arvore verificada seja promovida atomicamente no mesmo volume; o manifesto fixado nao e reescrito quando seu conteudo normalizado ja corresponde aos arquivos verificados. Os transportes plugaveis nao sao empacotados.
 
 `probe:tor` inicia uma instancia temporaria e isolada, aguarda bootstrap completo e valida um handshake TLS autenticado com `gateway.discord.gg` por SOCKS5. Ele nao altera o Discord nem o runtime persistente.
 
