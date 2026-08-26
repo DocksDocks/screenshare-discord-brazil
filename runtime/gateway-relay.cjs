@@ -3,11 +3,26 @@
 const net = require("node:net");
 const path = require("node:path");
 const tls = require("node:tls");
+const trustedTlsConnect = tls.connect.bind(tls);
+
+function normalizeDnsHost(host) {
+  if (typeof host !== "string") return null;
+  const withoutRoot = host.endsWith(".") ? host.slice(0, -1) : host;
+  if (withoutRoot.length === 0 || withoutRoot.length > 253) return null;
+  const labels = withoutRoot.split(".");
+  if (
+    labels.some(
+      (label) => label.length === 0 || label.length > 63 || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label),
+    )
+  ) {
+    return null;
+  }
+  return withoutRoot.toLowerCase();
+}
 
 function isRoutedHost(host) {
-  const lower = String(host).toLowerCase();
-  const normalized = lower.endsWith(".") ? lower.slice(0, -1) : lower;
-  return normalized === "discord.gg" || normalized.endsWith(".discord.gg");
+  const normalized = normalizeDnsHost(host);
+  return normalized !== null && (normalized === "discord.gg" || normalized.endsWith(".discord.gg"));
 }
 
 function relayPortForExecutable(executable) {
@@ -58,8 +73,11 @@ function socksFrameSize(buffer) {
 }
 
 function domainRequest(host, port) {
-  const encoded = Buffer.from(host, "ascii");
-  if (encoded.length === 0 || encoded.length > 255) throw new Error("invalid_socks_target");
+  const normalized = normalizeDnsHost(host);
+  if (normalized === null || !Number.isSafeInteger(port) || port <= 0 || port > 65_535) {
+    throw new Error("invalid_socks_target");
+  }
+  const encoded = Buffer.from(normalized, "ascii");
   const request = Buffer.alloc(7 + encoded.length);
   request.set([5, 1, 0, 3, encoded.length]);
   encoded.copy(request, 5);
@@ -71,9 +89,12 @@ function parseDomainRequest(request) {
   if (request === null || request[0] !== 5 || request[1] !== 1 || request[2] !== 0 || request[3] !== 3) return null;
   const length = request[4];
   if (length === 0) return null;
-  const lower = request.subarray(5, 5 + length).toString("ascii").toLowerCase();
+  const encoded = request.subarray(5, 5 + length);
+  if (encoded.some((byte) => byte > 0x7f)) return null;
+  const host = normalizeDnsHost(encoded.toString("ascii"));
+  if (host === null) return null;
   return {
-    host: lower.endsWith(".") ? lower.slice(0, -1) : lower,
+    host,
     port: request.readUInt16BE(5 + length),
   };
 }
@@ -127,7 +148,7 @@ async function probeSocks5Tls(proxyPort, host, timeoutMs) {
   if (socket === null) return false;
 
   return new Promise((resolve) => {
-    const secure = tls.connect({ socket, servername: host, rejectUnauthorized: true });
+    const secure = trustedTlsConnect({ socket, servername: host, rejectUnauthorized: true });
     let settled = false;
     const finish = (result) => {
       if (settled) return;

@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -19,8 +19,20 @@ interface RuntimeLayout {
   torRoot: string;
 }
 
+const PACKAGED_RUNTIME_SHA256 = {
+  "gateway-relay.cjs": "8519c0a763e9d88b79fd073fdcaf77d931e75af5bb26ac6aa530fff8c2574d3e",
+  "payload.cjs": "e2b62597b2c45d00318f9c248fe2c38e7f2767fbf30080e94974fceb1cc6f7f5",
+  "proxy.pac": "ef392cc5619a91e4ff412b2ab0fdca5252dc8a78c899876986d71828b44fc50f",
+  "runtime-safety.cjs": "8071de16675ff07848cb1f24380b8297d058f87a6e9b05ea23238bf941018186",
+  "tor-manifest.json": "498db398b840eb241cbcad35fcb2960f5b229a9a6687f4cc3dacaf9f09567343",
+} as const;
+
 function sha256(file: string): string {
   return createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+}
+
+function sourceSha256(file: string): string {
+  return createHash("sha256").update(fs.readFileSync(file, "utf8").replaceAll("\r\n", "\n")).digest("hex");
 }
 
 function locateRuntime(sourceRoot: string): RuntimeLayout {
@@ -42,6 +54,24 @@ function locateRuntime(sourceRoot: string): RuntimeLayout {
         manifestPath: path.join(sourceRoot, "vendor", "tor-manifest.json"),
         torRoot: path.join(sourceRoot, "vendor", "tor"),
       };
+}
+
+function isPackagedRuntimeSource(sourceRoot: string): boolean {
+  const resourcesPath = (process as typeof process & { resourcesPath?: string }).resourcesPath;
+  return typeof resourcesPath === "string" && path.resolve(sourceRoot) === path.resolve(resourcesPath, "runtime");
+}
+
+function verifyPackagedRuntime(layout: RuntimeLayout): void {
+  const files: Record<string, string> = {
+    "gateway-relay.cjs": layout.relayPath,
+    "payload.cjs": layout.payloadPath,
+    "proxy.pac": layout.pacPath,
+    "runtime-safety.cjs": layout.safetyPath,
+    "tor-manifest.json": layout.manifestPath,
+  };
+  for (const [name, expected] of Object.entries(PACKAGED_RUNTIME_SHA256)) {
+    if (sourceSha256(files[name]) !== expected) throw new Error(`Runtime empacotado invalido: ${name}.`);
+  }
 }
 
 function readManifest(manifestPath: string): TorManifest {
@@ -99,13 +129,14 @@ function filesBelow(root: string, current = root): string[] {
   });
 }
 
-function verifyRuntime(sourceRoot: string): { layout: RuntimeLayout; manifest: TorManifest } {
+function verifyRuntime(sourceRoot: string, enforcePackagedHashes: boolean): { layout: RuntimeLayout; manifest: TorManifest } {
   const layout = locateRuntime(sourceRoot);
   for (const required of [layout.payloadPath, layout.pacPath, layout.relayPath, layout.safetyPath, layout.manifestPath]) {
     if (!fs.existsSync(required) || !fs.statSync(required).isFile()) {
       throw new Error(`Runtime incompleto: ${path.basename(required)}.`);
     }
   }
+  if (enforcePackagedHashes) verifyPackagedRuntime(layout);
   const manifest = readManifest(layout.manifestPath);
   const listedFiles = Object.keys(manifest.files).sort();
   const actualFiles = filesBelow(layout.torRoot).sort();
@@ -126,34 +157,67 @@ function verifyRuntime(sourceRoot: string): { layout: RuntimeLayout; manifest: T
   return { layout, manifest };
 }
 
-function runtimeIdentity(sourceRoot: string): string {
-  const { layout, manifest } = verifyRuntime(sourceRoot);
+function runtimeIdentity(sourceRoot: string, enforcePackagedHashes: boolean): string {
+  const { layout } = verifyRuntime(sourceRoot, enforcePackagedHashes);
   return createHash("sha256")
     .update(sha256(layout.payloadPath))
     .update(sha256(layout.pacPath))
     .update(sha256(layout.relayPath))
     .update(sha256(layout.safetyPath))
-    .update(JSON.stringify(manifest))
+    .update(sha256(layout.manifestPath))
     .digest("hex");
 }
 
 export function prepareRuntime(sourceRoot: string, dataRoot: string): string {
   if (!fs.existsSync(sourceRoot)) throw new Error("O executavel nao inclui o runtime local.");
-  const sourceIdentity = runtimeIdentity(sourceRoot);
+  const enforcePackagedHashes = isPackagedRuntimeSource(sourceRoot);
+  const sourceIdentity = runtimeIdentity(sourceRoot, enforcePackagedHashes);
   const destination = path.join(dataRoot, "runtime");
-  if (fs.existsSync(destination)) {
+  const stage = path.join(dataRoot, ".runtime-stage");
+  const previous = path.join(dataRoot, ".runtime-previous");
+  const matchesSource = (root: string): boolean => {
     try {
-      if (runtimeIdentity(destination) === sourceIdentity) return path.join(destination, "payload.cjs");
+      return runtimeIdentity(root, enforcePackagedHashes) === sourceIdentity;
     } catch {
-      // A staged replacement below repairs a partial or modified runtime.
+      return false;
     }
-  }
+  };
+  const isCompleteRuntime = (root: string): boolean => {
+    try {
+      runtimeIdentity(root, false);
+      return true;
+    } catch {
+      return false;
+    }
+  };
 
   fs.mkdirSync(dataRoot, { recursive: true });
-  const stage = path.join(dataRoot, `.runtime-stage-${randomUUID()}`);
-  const previous = path.join(dataRoot, `.runtime-previous-${randomUUID()}`);
+  if (fs.existsSync(destination) && matchesSource(destination)) {
+    fs.rmSync(stage, { recursive: true, force: true });
+    fs.rmSync(previous, { recursive: true, force: true });
+    return path.join(destination, "payload.cjs");
+  }
+
+  if (fs.existsSync(previous)) {
+    if (!fs.existsSync(destination) && fs.existsSync(stage) && matchesSource(stage)) {
+      fs.renameSync(stage, destination);
+      fs.rmSync(previous, { recursive: true, force: true });
+      return path.join(destination, "payload.cjs");
+    }
+    if (fs.existsSync(destination) && isCompleteRuntime(destination)) {
+      fs.rmSync(previous, { recursive: true, force: true });
+    } else {
+      fs.rmSync(destination, { recursive: true, force: true });
+      fs.renameSync(previous, destination);
+    }
+  }
+  fs.rmSync(stage, { recursive: true, force: true });
+  if (fs.existsSync(destination)) {
+    if (matchesSource(destination)) return path.join(destination, "payload.cjs");
+  }
+
   try {
-    const { layout } = verifyRuntime(sourceRoot);
+    const { layout } = verifyRuntime(sourceRoot, enforcePackagedHashes);
     fs.mkdirSync(stage);
     fs.copyFileSync(layout.payloadPath, path.join(stage, "payload.cjs"), fs.constants.COPYFILE_EXCL);
     fs.copyFileSync(layout.pacPath, path.join(stage, "proxy.pac"), fs.constants.COPYFILE_EXCL);
@@ -161,13 +225,19 @@ export function prepareRuntime(sourceRoot: string, dataRoot: string): string {
     fs.copyFileSync(layout.safetyPath, path.join(stage, "runtime-safety.cjs"), fs.constants.COPYFILE_EXCL);
     fs.copyFileSync(layout.manifestPath, path.join(stage, "tor-manifest.json"), fs.constants.COPYFILE_EXCL);
     fs.cpSync(layout.torRoot, path.join(stage, "tor"), { recursive: true, errorOnExist: true, force: false });
-    if (runtimeIdentity(stage) !== sourceIdentity) throw new Error("A copia local do runtime nao confere.");
+    if (runtimeIdentity(stage, enforcePackagedHashes) !== sourceIdentity) {
+      throw new Error("A copia local do runtime nao confere.");
+    }
     if (fs.existsSync(destination)) fs.renameSync(destination, previous);
     fs.renameSync(stage, destination);
+    if (!matchesSource(destination)) throw new Error("O runtime promovido nao confere.");
     fs.rmSync(previous, { recursive: true, force: true });
     return path.join(destination, "payload.cjs");
   } catch (error) {
-    if (!fs.existsSync(destination) && fs.existsSync(previous)) fs.renameSync(previous, destination);
+    if (fs.existsSync(previous)) {
+      fs.rmSync(destination, { recursive: true, force: true });
+      fs.renameSync(previous, destination);
+    }
     fs.rmSync(stage, { recursive: true, force: true });
     throw error;
   }
@@ -175,7 +245,7 @@ export function prepareRuntime(sourceRoot: string, dataRoot: string): string {
 
 export function runtimeSourceReady(sourceRoot: string): boolean {
   try {
-    verifyRuntime(sourceRoot);
+    verifyRuntime(sourceRoot, isPackagedRuntimeSource(sourceRoot));
     return true;
   } catch {
     return false;

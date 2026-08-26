@@ -7,6 +7,7 @@ const path = require("node:path");
 const { app, session } = require("electron");
 const { probeSocks5Tls, relayPortForExecutable, startGatewayRelay } = require("./gateway-relay.cjs");
 const {
+  installNodeNetworkGuards,
   listContainedFiles,
   processMatchesExecutable,
   processOwnsLoopbackTcpListener,
@@ -14,6 +15,17 @@ const {
 } = require("./runtime-safety.cjs");
 
 const TOR_PORT = 9060;
+const CONFLICTING_CHROMIUM_SWITCHES = [
+  "host-resolver-rules",
+  "host-rules",
+  "no-proxy-server",
+  "proxy-auto-detect",
+  "proxy-bypass-list",
+  "proxy-pac-url",
+  "proxy-server",
+];
+const HOST_RESOLVER_RULES =
+  "MAP discord.gg ^NOTFOUND, MAP *.discord.gg ^NOTFOUND, MAP discord.gg. ^NOTFOUND, MAP *.discord.gg. ^NOTFOUND";
 const runtimeDir = __dirname;
 const dataRoot = path.dirname(runtimeDir);
 const stateDir = path.join(dataRoot, "tor-state");
@@ -21,12 +33,9 @@ const pidPath = path.join(stateDir, "tor.pid");
 const torExe = path.join(runtimeDir, "tor", "tor", "tor.exe");
 const relayPort = relayPortForExecutable(process.execPath);
 const pacTemplate = fs.readFileSync(path.join(runtimeDir, "proxy.pac"), "utf8");
-if (!pacTemplate.includes("__GATEWAY_RELAY_PORT__")) throw new Error("runtime_integrity_failed");
+if (pacTemplate.split("__GATEWAY_RELAY_PORT__").length !== 2) throw new Error("runtime_integrity_failed");
 const pacText = pacTemplate.replaceAll("__GATEWAY_RELAY_PORT__", String(relayPort));
 const pacUrl = `data:application/x-ns-proxy-autoconfig;base64,${Buffer.from(pacText).toString("base64")}`;
-
-// Chromium receives the fail-closed route before Discord's original main module can create a session.
-app.commandLine.appendSwitch("proxy-pac-url", pacUrl);
 
 function log(code) {
   try {
@@ -35,6 +44,22 @@ function log(code) {
     // Routing must not depend on diagnostics.
   }
 }
+
+if (process.platform !== "win32") {
+  log("unsupported_platform");
+  app.exit(1);
+  throw new Error("unsupported_platform");
+}
+if (CONFLICTING_CHROMIUM_SWITCHES.some((name) => app.commandLine.hasSwitch(name))) {
+  log("chromium_route_conflict");
+  app.exit(1);
+  throw new Error("chromium_route_conflict");
+}
+
+// These switches must be installed synchronously before Chromium creates its default session.
+app.commandLine.appendSwitch("proxy-pac-url", pacUrl);
+app.commandLine.appendSwitch("host-resolver-rules", HOST_RESOLVER_RULES);
+installNodeNetworkGuards();
 
 function hashFile(file) {
   return createHash("sha256").update(fs.readFileSync(file)).digest("hex");
@@ -132,18 +157,16 @@ async function waitForTor() {
   throw new Error("tor_unavailable");
 }
 
-let torProcess = null;
-let torReady;
 let trustedTorPid = 0;
-try {
+async function startTor() {
   verifyTor();
   const existingPid = fs.existsSync(pidPath) ? Number(fs.readFileSync(pidPath, "utf8").trim()) : 0;
-  if (processMatchesExecutable(existingPid, torExe)) {
+  if (await processMatchesExecutable(existingPid, torExe)) {
     trustedTorPid = existingPid;
     log("tor_existing");
   } else {
     fs.rmSync(pidPath, { force: true });
-    torProcess = spawn(torExe, ["-f", writeTorrc()], {
+    const torProcess = spawn(torExe, ["-f", writeTorrc()], {
       detached: true,
       stdio: "ignore",
       windowsHide: true,
@@ -157,11 +180,13 @@ try {
     torProcess.unref();
     log("tor_started");
   }
-  torReady = waitForTor();
-} catch {
-  log("tor_blocked");
-  torReady = Promise.reject(new Error("tor_blocked"));
+  await waitForTor();
 }
+
+const torReady = startTor().catch(() => {
+  log("tor_blocked");
+  throw new Error("tor_blocked");
+});
 void torReady.catch(() => undefined);
 
 const gatewayRelay = startGatewayRelay({
@@ -172,6 +197,16 @@ const gatewayRelay = startGatewayRelay({
   onRouted: () => log("gateway_routed"),
 });
 
+const originalWhenReady = app.whenReady;
+const originalIsReady = app.isReady;
+const electronWhenReady = originalWhenReady.bind(app);
+const electronIsReady = originalIsReady.bind(app);
+let electronReadyArguments = [];
+app.once("ready", (...args) => {
+  electronReadyArguments = args;
+});
+const electronReady = electronWhenReady();
+
 async function blockAllTraffic() {
   await session.defaultSession.setProxy({
     mode: "fixed_servers",
@@ -180,28 +215,75 @@ async function blockAllTraffic() {
   await session.defaultSession.closeAllConnections();
 }
 
-app.whenReady().then(async () => {
-  try {
-    await Promise.all([gatewayRelay.ready, torReady]);
-    const [canonical, regional, ordinary] = await Promise.all([
-      session.defaultSession.resolveProxy("https://gateway.discord.gg"),
-      session.defaultSession.resolveProxy("https://gateway-us-east1-b.discord.gg"),
-      session.defaultSession.resolveProxy("https://discord.com"),
-    ]);
-    if (!canonical.includes(String(relayPort)) || !regional.includes(String(relayPort)) || ordinary !== "DIRECT") {
-      await blockAllTraffic();
-      log("route_verification_failed");
-      return;
-    }
-    log("route_ready");
-  } catch {
-    try {
-      await blockAllTraffic();
-    } finally {
-      log("route_blocked");
-    }
+function chromiumRouteIsConfigured() {
+  return CONFLICTING_CHROMIUM_SWITCHES.every((name) => {
+    if (name === "proxy-pac-url") return app.commandLine.getSwitchValue(name) === pacUrl;
+    if (name === "host-resolver-rules") return app.commandLine.getSwitchValue(name) === HOST_RESOLVER_RULES;
+    return !app.commandLine.hasSwitch(name);
+  });
+}
+
+async function verifyStartupRoute() {
+  await Promise.all([electronReady, gatewayRelay.ready]);
+  const expectedGatewayRoute = `SOCKS5 127.0.0.1:${relayPort}`;
+  const [canonical, regional, ordinary] = await Promise.all([
+    session.defaultSession.resolveProxy("https://gateway.discord.gg"),
+    session.defaultSession.resolveProxy("https://gateway-us-east1-b.discord.gg"),
+    session.defaultSession.resolveProxy("https://discord.com"),
+  ]);
+  if (
+    !chromiumRouteIsConfigured() ||
+    canonical !== expectedGatewayRoute ||
+    regional !== expectedGatewayRoute ||
+    ordinary !== "DIRECT"
+  ) {
+    log("route_verification_failed");
+    throw new Error("route_verification_failed");
   }
+  await torReady;
+  log("route_ready");
+}
+
+const startupReady = verifyStartupRoute().catch(async (error) => {
+  try {
+    await electronReady;
+    await blockAllTraffic();
+  } finally {
+    log("route_blocked");
+    app.exit(1);
+  }
+  throw error;
 });
+void startupReady.catch(() => undefined);
+
+function holdDiscordReady(ready, load) {
+  const initialReadyListeners = new Set(app.rawListeners("ready"));
+
+  app.whenReady = () => ready;
+  app.isReady = () => false;
+
+  return ready.then(
+    () => {
+      load();
+      const listeners = app.rawListeners("ready").filter((listener) => !initialReadyListeners.has(listener));
+      for (const listener of listeners) {
+        app.removeListener("ready", listener);
+      }
+      app.whenReady = originalWhenReady;
+      app.isReady = originalIsReady;
+      for (const listener of listeners) {
+        try {
+          Reflect.apply(listener, app, electronReadyArguments);
+        } catch (error) {
+          process.nextTick(() => {
+            throw error;
+          });
+          break;
+        }
+      }
+    },
+  );
+}
 
 function loadDiscord() {
   const injectorPath = require.main.filename;
@@ -217,12 +299,8 @@ function loadDiscord() {
   require(require.main.filename);
 }
 
-void gatewayRelay.ready
-  .then(() => {
-    if (app.isReady()) throw new Error("relay_started_too_late");
-    loadDiscord();
-  })
+void holdDiscordReady(startupReady, loadDiscord)
   .catch(() => {
-    log("relay_blocked");
+    log("discord_blocked");
     app.exit(1);
   });

@@ -1,7 +1,4 @@
-[CmdletBinding()]
 param(
-  [string]$CertificatePath,
-  [string]$SetupPath,
   [switch]$RemoveTrust
 )
 
@@ -10,69 +7,536 @@ $ErrorActionPreference = "Stop"
 
 $expectedThumbprint = "4960FAD2932D56589F1DADFF3CBEE143FAA9EB35"
 $expectedCertificateSha256 = "D5D0C0EE02D56A38910CF223A55EDFAA28223AFF8AABF54DCD322F0DB6EB078A"
-if ([string]::IsNullOrWhiteSpace($CertificatePath)) {
-  $CertificatePath = Join-Path $PSScriptRoot "GoLiveBypassSafe.cer"
-}
-if (-not $RemoveTrust -and [string]::IsNullOrWhiteSpace($SetupPath)) {
-  $SetupPath = Join-Path $PSScriptRoot "GoLiveBypassSafeSetup.exe"
+$releaseVersion = "__RELEASE_VERSION__"
+$sourceCommit = "__SOURCE_COMMIT__"
+$sourceState = "__SOURCE_STATE__"
+$expectedHelperSha256 = "__HELPER_SHA256__"
+$expectedSetupSha256 = "__SETUP_SHA256__"
+$expectedPortableSha256 = "__PORTABLE_SHA256__"
+$sacRegistrySubKey = "SYSTEM\CurrentControlSet\Control\CI\Policy"
+$sacRegistryValue = "VerifiedAndReputablePolicyState"
+$helperTimeoutSeconds = 600
+$applicationTimeoutSeconds = 180
+$cleanupTimeoutSeconds = 60
+
+function Assert-RegularFileWithoutReparsePoints([string]$Path) {
+  $fullPath = [IO.Path]::GetFullPath($Path)
+  $current = $fullPath
+  while ($true) {
+    $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw "reparse_point"
+    }
+    $parent = [IO.Directory]::GetParent($current)
+    if ($null -eq $parent) {
+      break
+    }
+    $current = $parent.FullName
+  }
+  if ((Get-Item -LiteralPath $fullPath -Force).PSIsContainer) {
+    throw "not_regular_file"
+  }
+  return $fullPath
 }
 
-$certificatePath = (Resolve-Path -LiteralPath $CertificatePath).Path
-if ((Get-FileHash -LiteralPath $certificatePath -Algorithm SHA256).Hash -ne $expectedCertificateSha256) {
-  throw "The public certificate hash does not match this release."
-}
-
-$certificate = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certificatePath)
-if ($certificate.Thumbprint -ne $expectedThumbprint) {
-  throw "The public certificate thumbprint does not match this release."
-}
-if ($certificate.PublicKey.Oid.Value -ne "1.2.840.113549.1.1.1") {
-  throw "The release certificate is not RSA."
-}
-$hasCodeSigningEku = $false
-foreach ($usage in $certificate.EnhancedKeyUsageList) {
-  $oid = if ($usage.ObjectId -is [string]) { $usage.ObjectId } else { $usage.ObjectId.Value }
-  if ($oid -eq "1.3.6.1.5.5.7.3.3") {
-    $hasCodeSigningEku = $true
+function Get-LockedSha256([IO.FileStream]$Stream) {
+  $position = $Stream.Position
+  $sha256 = [Security.Cryptography.SHA256]::Create()
+  try {
+    $Stream.Position = 0
+    return ([BitConverter]::ToString($sha256.ComputeHash($Stream))).Replace("-", "")
+  } finally {
+    $Stream.Position = $position
+    $sha256.Dispose()
   }
 }
-if (-not $hasCodeSigningEku) {
-  throw "The release certificate is not authorized for code signing."
+
+function Assert-ExpectedSignature([string]$Path) {
+  $signature = Get-AuthenticodeSignature -LiteralPath $Path
+  if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid -or
+      $null -eq $signature.SignerCertificate -or
+      $signature.SignerCertificate.Thumbprint -cne $expectedThumbprint) {
+    throw "signature_mismatch"
+  }
 }
 
-$stores = @("Cert:\CurrentUser\Root", "Cert:\CurrentUser\TrustedPublisher")
-if ($RemoveTrust) {
-  $scriptSignature = Get-AuthenticodeSignature -LiteralPath $PSCommandPath
-  if ($scriptSignature.Status -ne "Valid" -or $scriptSignature.SignerCertificate.Thumbprint -ne $expectedThumbprint) {
-    throw "This trust script does not have the expected valid signature."
+function Get-SacState {
+  $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($sacRegistrySubKey, $false)
+  if ($null -eq $key) {
+    throw "sac_registry_key_missing"
   }
-  foreach ($store in $stores) {
-    $trustedCertificate = Join-Path $store $expectedThumbprint
-    if (Test-Path -LiteralPath $trustedCertificate) {
-      Remove-Item -LiteralPath $trustedCertificate -Force
+  try {
+    if (-not (@($key.GetValueNames()) -ccontains $sacRegistryValue)) {
+      return "missing"
+    }
+    if ($key.GetValueKind($sacRegistryValue) -ne [Microsoft.Win32.RegistryValueKind]::DWord) {
+      throw "sac_registry_type_invalid"
+    }
+    $rawValue = [int32]$key.GetValue($sacRegistryValue, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    $value = [BitConverter]::ToUInt32([BitConverter]::GetBytes($rawValue), 0)
+    return $value.ToString([Globalization.CultureInfo]::InvariantCulture)
+  } finally {
+    $key.Dispose()
+  }
+}
+
+function Read-ProtocolLine([IO.StreamReader]$Reader) {
+  $line = New-Object Text.StringBuilder
+  while ($line.Length -le 256) {
+    $character = $Reader.Read()
+    if ($character -eq -1) {
+      if ($line.Length -eq 0) {
+        return $null
+      }
+      throw "protocol_eof"
+    }
+    if ($character -eq 10) {
+      return $line.ToString()
+    }
+    if ($character -eq 13) {
+      throw "protocol_carriage_return"
+    }
+    [void]$line.Append([char]$character)
+  }
+  throw "protocol_line_too_long"
+}
+
+function Get-ProcessCreationTime([object]$Candidate) {
+  return ([DateTimeOffset]$Candidate.CreationDate).ToUnixTimeMilliseconds()
+}
+
+function Add-DescendantProcesses([object[]]$Processes, [hashtable]$KnownProcesses) {
+  foreach ($candidate in $Processes) {
+    $processId = [int]$candidate.ProcessId
+    if ($KnownProcesses.ContainsKey($processId) -and
+        $KnownProcesses[$processId] -ne (Get-ProcessCreationTime $candidate)) {
+      [void]$KnownProcesses.Remove($processId)
     }
   }
-  return
+  do {
+    $added = $false
+    foreach ($candidate in $Processes) {
+      $processId = [int]$candidate.ProcessId
+      $parentProcessId = [int]$candidate.ParentProcessId
+      $creationTime = Get-ProcessCreationTime $candidate
+      if (-not $KnownProcesses.ContainsKey($processId) -and
+          $KnownProcesses.ContainsKey($parentProcessId) -and
+          $creationTime -ge $KnownProcesses[$parentProcessId]) {
+        $KnownProcesses[$processId] = $creationTime
+        $added = $true
+      }
+    }
+  } while ($added)
 }
 
-foreach ($store in $stores) {
-  if (-not (Test-Path -LiteralPath (Join-Path $store $expectedThumbprint))) {
-    Import-Certificate -FilePath $certificatePath -CertStoreLocation $store | Out-Null
+function Stop-ProcessTree([hashtable]$KnownProcesses) {
+  for ($attempt = 0; $attempt -lt 3; $attempt++) {
+    $current = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, CreationDate)
+    Add-DescendantProcesses $current $knownProcesses
+    $opened = New-Object Collections.Generic.List[Diagnostics.Process]
+    foreach ($entry in @($knownProcesses.GetEnumerator() | Sort-Object Value -Descending)) {
+      $candidate = $null
+      try {
+        $candidate = [Diagnostics.Process]::GetProcessById([int]$entry.Key)
+        $null = $candidate.Handle
+        $creationTime = ([DateTimeOffset]$candidate.StartTime).ToUnixTimeMilliseconds()
+        if ($creationTime -ne [long]$entry.Value) {
+          $candidate.Dispose()
+          [void]$knownProcesses.Remove([int]$entry.Key)
+          continue
+        }
+        $opened.Add($candidate)
+      } catch [ArgumentException] {
+        if ($null -ne $candidate) {
+          $candidate.Dispose()
+        }
+        [void]$knownProcesses.Remove([int]$entry.Key)
+      } catch [InvalidOperationException] {
+        if ($null -ne $candidate -and -not $candidate.HasExited) {
+          throw
+        }
+        if ($null -ne $candidate) {
+          $candidate.Dispose()
+        }
+        [void]$knownProcesses.Remove([int]$entry.Key)
+      }
+    }
+    if ($opened.Count -eq 0) {
+      return
+    }
+    foreach ($candidate in $opened) {
+      try {
+        if (-not $candidate.HasExited) {
+          $candidate.Kill()
+        }
+        if (-not $candidate.WaitForExit(5000) -and -not $candidate.HasExited) {
+          throw "process_tree_termination_timeout"
+        }
+      } finally {
+        $candidate.Dispose()
+      }
+    }
+    Start-Sleep -Milliseconds 250
+  }
+  throw "process_tree_termination_unconfirmed"
+}
+
+function Invoke-BoundedProcess([string]$Path, [string]$Arguments, [int]$TimeoutSeconds) {
+  $process = Start-Process -FilePath $Path -ArgumentList $Arguments -PassThru
+  $knownProcesses = @{
+    $process.Id = ([DateTimeOffset]$process.StartTime).ToUnixTimeMilliseconds()
+  }
+  $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+  while (-not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+    $snapshot = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, CreationDate)
+    Add-DescendantProcesses $snapshot $knownProcesses
+    if (-not $process.HasExited) {
+      Start-Sleep -Milliseconds 100
+    }
+  }
+  $finalSnapshot = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, CreationDate)
+  Add-DescendantProcesses $finalSnapshot $knownProcesses
+  if (-not $process.HasExited) {
+    Stop-ProcessTree $knownProcesses
+    throw "process_timeout"
+  }
+  if ($process.ExitCode -ne 0) {
+    Stop-ProcessTree $knownProcesses
+    throw "process_exit_$($process.ExitCode)"
   }
 }
 
-$scriptSignature = Get-AuthenticodeSignature -LiteralPath $PSCommandPath
-if ($scriptSignature.Status -ne "Valid" -or $scriptSignature.SignerCertificate.Thumbprint -ne $expectedThumbprint) {
-  throw "This trust script does not have the expected valid signature."
+function Remove-AddedTrust([string[]]$Stores) {
+  $confirmed = $true
+  foreach ($store in $Stores) {
+    $entry = Join-Path $store $expectedThumbprint
+    try {
+      if (Test-Path -LiteralPath $entry) {
+        Remove-Item -LiteralPath $entry -Force
+      }
+      if (Test-Path -LiteralPath $entry) {
+        $confirmed = $false
+      }
+    } catch {
+      $confirmed = $false
+    }
+  }
+  return $confirmed
 }
 
-$setupPath = (Resolve-Path -LiteralPath $SetupPath).Path
-$signature = Get-AuthenticodeSignature -LiteralPath $setupPath
-if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Thumbprint -ne $expectedThumbprint) {
-  throw "The installer does not have the expected valid signature."
+$locks = @{}
+$addedStores = New-Object Collections.Generic.List[string]
+$listener = $null
+$client = $null
+$stream = $null
+$reader = $null
+$writer = $null
+$helperProcess = $null
+$helperCreationTime = $null
+$priorSacState = $null
+$stage = "startup"
+$successRecord = $null
+$failure = $null
+$failureStage = $null
+$trustRemovalUnconfirmed = $false
+$applicationRollbackConfirmed = $true
+$sacRollbackAcknowledged = $false
+$helperCouldChangeSac = $false
+$setupStarted = $false
+$portableStarted = $false
+$managerInitiallyInstalled = $false
+$installedManagerRoot = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)) "Programs\golivebypass-safe"
+$installedManagerPath = Join-Path $installedManagerRoot "GoLiveBypass Safe.exe"
+$installedUninstallerPath = Join-Path $installedManagerRoot "Uninstall GoLiveBypass Safe.exe"
+
+try {
+  $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+  if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw "elevated_controller"
+  }
+
+  $controllerPath = Assert-RegularFileWithoutReparsePoints $PSCommandPath
+  $certificatePath = Assert-RegularFileWithoutReparsePoints (Join-Path $PSScriptRoot "GoLiveBypassSafe.cer")
+  $pathsToLock = @($controllerPath, $certificatePath)
+  if (-not $RemoveTrust) {
+    $helperPath = Assert-RegularFileWithoutReparsePoints (Join-Path $PSScriptRoot "Sac-GoLiveBypassSafe.ps1")
+    $setupPath = Assert-RegularFileWithoutReparsePoints (Join-Path $PSScriptRoot "GoLiveBypassSafeSetup.exe")
+    $portablePath = Assert-RegularFileWithoutReparsePoints (Join-Path $PSScriptRoot "GoLiveBypassSafePortable.exe")
+    $pathsToLock += @($helperPath, $setupPath, $portablePath)
+  }
+  foreach ($path in $pathsToLock) {
+    $locks[$path] = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+  }
+
+  $stage = "certificate"
+  if ((Get-LockedSha256 $locks[$certificatePath]) -cne $expectedCertificateSha256) {
+    throw "certificate_hash_mismatch"
+  }
+  $certificate = New-Object Security.Cryptography.X509Certificates.X509Certificate2($certificatePath)
+  if ($certificate.Thumbprint -cne $expectedThumbprint) {
+    throw "certificate_thumbprint_mismatch"
+  }
+  if ($certificate.PublicKey.Oid.Value -cne "1.2.840.113549.1.1.1") {
+    throw "certificate_not_rsa"
+  }
+  $hasCodeSigningEku = $false
+  foreach ($extension in $certificate.Extensions) {
+    if ($extension.Oid.Value -eq "2.5.29.37") {
+      $ekuExtension = [Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]$extension
+      foreach ($usage in $ekuExtension.EnhancedKeyUsages) {
+        if ($usage.Value -eq "1.3.6.1.5.5.7.3.3") {
+          $hasCodeSigningEku = $true
+        }
+      }
+    }
+  }
+  if (-not $hasCodeSigningEku) {
+    throw "certificate_eku_mismatch"
+  }
+
+  $stores = @("Cert:\CurrentUser\Root", "Cert:\CurrentUser\TrustedPublisher")
+  if ($RemoveTrust) {
+    $stage = "remove_trust_authentication"
+    Assert-ExpectedSignature $controllerPath
+    foreach ($store in $stores) {
+      $entry = Join-Path $store $expectedThumbprint
+      if (Test-Path -LiteralPath $entry) {
+        Remove-Item -LiteralPath $entry -Force
+      }
+      if (Test-Path -LiteralPath $entry) {
+        $trustRemovalUnconfirmed = $true
+      }
+    }
+    if ($trustRemovalUnconfirmed) {
+      throw "remove_trust_unconfirmed"
+    }
+    $successRecord = "GOLIVE_AUTOMATION_OK mode=remove_trust"
+  } else {
+    $stage = "placeholders"
+    if ($releaseVersion -eq "__RELEASE_VERSION__" -or
+        $sourceCommit -eq "__SOURCE_COMMIT__" -or
+        $sourceState -eq "__SOURCE_STATE__" -or
+        $expectedHelperSha256 -eq "__HELPER_SHA256__" -or
+        $expectedSetupSha256 -eq "__SETUP_SHA256__" -or
+        $expectedPortableSha256 -eq "__PORTABLE_SHA256__") {
+      throw "unresolved_build_placeholder"
+    }
+    if ($releaseVersion -notmatch '^\d+\.\d+\.\d+$' -or
+        $sourceCommit -notmatch '^[0-9a-f]{40}$' -or
+        @("release", "development") -cnotcontains $sourceState -or
+        $expectedHelperSha256 -notmatch '^[0-9A-F]{64}$' -or
+        $expectedSetupSha256 -notmatch '^[0-9A-F]{64}$' -or
+        $expectedPortableSha256 -notmatch '^[0-9A-F]{64}$') {
+      throw "invalid_build_value"
+    }
+
+    $stage = "trust_import"
+    foreach ($store in $stores) {
+      $entry = Join-Path $store $expectedThumbprint
+      if (-not (Test-Path -LiteralPath $entry)) {
+        $addedStores.Add($store)
+        Import-Certificate -FilePath $certificatePath -CertStoreLocation $store | Out-Null
+      }
+      $trustedCertificate = Get-Item -LiteralPath $entry
+      if ([Convert]::ToBase64String($trustedCertificate.RawData) -cne [Convert]::ToBase64String($certificate.RawData)) {
+        throw "trusted_certificate_mismatch"
+      }
+    }
+
+    $stage = "artifact_verification"
+    Assert-ExpectedSignature $controllerPath
+    Assert-ExpectedSignature $helperPath
+    Assert-ExpectedSignature $setupPath
+    Assert-ExpectedSignature $portablePath
+    if ((Get-LockedSha256 $locks[$helperPath]) -cne $expectedHelperSha256 -or
+        (Get-LockedSha256 $locks[$setupPath]) -cne $expectedSetupSha256 -or
+        (Get-LockedSha256 $locks[$portablePath]) -cne $expectedPortableSha256) {
+      throw "artifact_hash_mismatch"
+    }
+    $managerInitiallyInstalled = (Test-Path -LiteralPath $installedManagerPath) -or (Test-Path -LiteralPath $installedUninstallerPath)
+
+    $stage = "sac_read"
+    $priorSacState = Get-SacState
+    if (@("missing", "0", "1", "2") -cnotcontains $priorSacState) {
+      throw "unexpected_sac_state"
+    }
+
+    $stage = "helper_launch"
+    $listener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, 0)
+    $listener.Server.ExclusiveAddressUse = $true
+    $listener.Start(1)
+    $port = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+    $tokenBytes = New-Object byte[] 32
+    $random = New-Object Security.Cryptography.RNGCryptoServiceProvider
+    try {
+      $random.GetBytes($tokenBytes)
+    } finally {
+      $random.Dispose()
+    }
+    $token = ([BitConverter]::ToString($tokenBytes)).Replace("-", "")
+    $systemPowerShell = Join-Path ([Environment]::SystemDirectory) "WindowsPowerShell\v1.0\powershell.exe"
+    $helperArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Port {1} -Token {2} -ExpectedState {3} -TimeoutSeconds {4}' -f $helperPath, $port, $token, $priorSacState, $helperTimeoutSeconds
+    $helperProcess = Start-Process -FilePath $systemPowerShell -Verb RunAs -ArgumentList $helperArguments -PassThru
+    $helperCreationTime = ([DateTimeOffset]$helperProcess.StartTime).ToUnixTimeMilliseconds()
+
+    $stage = "helper_handshake"
+    $acceptResult = $listener.BeginAcceptTcpClient($null, $null)
+    if (-not $acceptResult.AsyncWaitHandle.WaitOne(30000)) {
+      throw "helper_connect_timeout"
+    }
+    $client = $listener.EndAcceptTcpClient($acceptResult)
+    $listener.Stop()
+    $listener = $null
+    $stream = $client.GetStream()
+    $stream.ReadTimeout = $helperTimeoutSeconds * 1000
+    $stream.WriteTimeout = 10000
+    $reader = New-Object IO.StreamReader($stream, [Text.Encoding]::ASCII, $false, 256, $true)
+    $writer = New-Object IO.StreamWriter($stream, [Text.Encoding]::ASCII, 256, $true)
+    $writer.NewLine = "`n"
+    $writer.AutoFlush = $true
+    if ((Read-ProtocolLine $reader) -cne "HELLO $token") {
+      throw "helper_hello_invalid"
+    }
+    $writer.WriteLine("AUTH $token")
+    $helperCouldChangeSac = $true
+    if ((Read-ProtocolLine $reader) -cne "READY $token $priorSacState") {
+      throw "helper_ready_invalid"
+    }
+
+    $stage = "setup"
+    $setupStarted = $true
+    Invoke-BoundedProcess $setupPath "/S" $applicationTimeoutSeconds
+    $stage = "portable"
+    $portableStarted = $true
+    Invoke-BoundedProcess $portablePath "--install-and-exit" $applicationTimeoutSeconds
+
+    $stage = "commit"
+    $writer.WriteLine("COMMIT $token")
+    if ((Read-ProtocolLine $reader) -cne "COMMITTED $token") {
+      throw "helper_commit_invalid"
+    }
+    if (-not $helperProcess.WaitForExit(30000)) {
+      throw "helper_exit_timeout"
+    }
+    if ($helperProcess.ExitCode -ne 0) {
+      throw "helper_exit_$($helperProcess.ExitCode)"
+    }
+    $successRecord = "GOLIVE_AUTOMATION_OK version=$releaseVersion commit=$sourceCommit state=$sourceState"
+  }
+} catch {
+  $failure = $_
+  $failureStage = $stage
+  if ($portableStarted) {
+    try {
+      $stage = "application_restore"
+      Invoke-BoundedProcess $portablePath "--restore-before-uninstall" $cleanupTimeoutSeconds
+    } catch {
+      $applicationRollbackConfirmed = $false
+    }
+  }
+  if ($setupStarted -and -not $managerInitiallyInstalled) {
+    try {
+      $stage = "manager_cleanup"
+      if (Test-Path -LiteralPath $installedUninstallerPath) {
+        $installedUninstallerPath = Assert-RegularFileWithoutReparsePoints $installedUninstallerPath
+        Assert-ExpectedSignature $installedUninstallerPath
+        Invoke-BoundedProcess $installedUninstallerPath "/S" $cleanupTimeoutSeconds
+      }
+      if ((Test-Path -LiteralPath $installedManagerPath) -or (Test-Path -LiteralPath $installedUninstallerPath)) {
+        $applicationRollbackConfirmed = $false
+      }
+    } catch {
+      $applicationRollbackConfirmed = $false
+    }
+  }
+  if ($helperCouldChangeSac -and $null -ne $writer -and $null -ne $reader) {
+    try {
+      $stage = "sac_abort"
+      $writer.WriteLine("ABORT $token")
+      $sacRollbackAcknowledged = (Read-ProtocolLine $reader) -ceq "ROLLED_BACK $token"
+    } catch {
+      $sacRollbackAcknowledged = $false
+    }
+  }
+} finally {
+  if ($null -ne $writer) {
+    try {
+      $writer.Dispose()
+    } catch {
+    }
+  }
+  if ($null -ne $reader) {
+    try {
+      $reader.Dispose()
+    } catch {
+    }
+  }
+  if ($null -ne $stream) {
+    try {
+      $stream.Dispose()
+    } catch {
+    }
+  }
+  if ($null -ne $client) {
+    try {
+      $client.Close()
+    } catch {
+    }
+  }
+  if ($null -ne $listener) {
+    try {
+      $listener.Stop()
+    } catch {
+    }
+  }
 }
 
-$installer = Start-Process -FilePath $setupPath -Wait -PassThru
-if ($installer.ExitCode -ne 0) {
-  throw "The installer failed with exit code $($installer.ExitCode)."
+$sacRollbackConfirmed = $true
+$trustCleanupConfirmed = $true
+if ($null -ne $failure) {
+  if ($null -ne $helperProcess) {
+    try {
+      if (-not $helperProcess.HasExited -and -not $helperProcess.WaitForExit(30000)) {
+        $helperProcesses = @{ $helperProcess.Id = $helperCreationTime }
+        Stop-ProcessTree $helperProcesses
+        $sacRollbackConfirmed = $false
+      }
+    } catch {
+      $sacRollbackConfirmed = $false
+    }
+  }
+  if ($helperCouldChangeSac -and $priorSacState -eq "1" -and -not $sacRollbackAcknowledged) {
+    $sacRollbackConfirmed = $false
+  }
+  if ($null -ne $priorSacState) {
+    try {
+      if ((Get-SacState) -cne $priorSacState) {
+        $sacRollbackConfirmed = $false
+      }
+    } catch {
+      $sacRollbackConfirmed = $false
+    }
+  }
+  if ($addedStores.Count -ne 0) {
+    $trustCleanupConfirmed = Remove-AddedTrust ($addedStores.ToArray())
+  }
+  if ($trustRemovalUnconfirmed) {
+    $trustCleanupConfirmed = $false
+  }
 }
+
+foreach ($lock in $locks.Values) {
+  $lock.Dispose()
+}
+
+if ($null -eq $failure) {
+  [Console]::Out.WriteLine($successRecord)
+  exit 0
+}
+if (-not $sacRollbackConfirmed -or -not $trustCleanupConfirmed -or -not $applicationRollbackConfirmed) {
+  [Console]::Error.WriteLine("GOLIVE_AUTOMATION_ROLLBACK_UNCONFIRMED code=2 stage=$failureStage app=$($applicationRollbackConfirmed.ToString().ToLowerInvariant()) sac=$($sacRollbackConfirmed.ToString().ToLowerInvariant()) trust=$($trustCleanupConfirmed.ToString().ToLowerInvariant())")
+  exit 2
+}
+[Console]::Error.WriteLine("GOLIVE_AUTOMATION_ERROR code=1 stage=$failureStage")
+exit 1

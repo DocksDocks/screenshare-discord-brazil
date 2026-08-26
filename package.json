@@ -1,11 +1,16 @@
 {
   "name": "golivebypass-safe",
   "productName": "GoLiveBypass Safe",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Windows-only, Tor-only GoLiveBypass fork with reversible installation",
   "author": "GoLiveBypass Safe contributors",
   "license": "GPL-3.0-only",
   "private": true,
+  "packageManager": "npm@11.16.0",
+  "engines": {
+    "node": ">=24.0.0",
+    "npm": "11.16.0"
+  },
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -123,6 +128,8 @@
     "vitest": "4.1.11"
   },
   "allowScripts": {
-    "electron@43.4.1": true
+    "electron@43.4.1": true,
+    "electron-winstaller@5.4.0": false,
+    "fsevents@2.3.3": false
   }
 }

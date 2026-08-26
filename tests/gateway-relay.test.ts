@@ -41,16 +41,24 @@ function read(socket: net.Socket, size: number): Promise<Buffer> {
   });
 }
 
-async function beginRequest(socket: net.Socket, host: string): Promise<{ response: Promise<Buffer> }> {
+async function beginFrame(socket: net.Socket, frame: Buffer): Promise<{ response: Promise<Buffer> }> {
   socket.write(Buffer.from([5, 1, 0]));
   expect(await read(socket, 2)).toEqual(Buffer.from([5, 0]));
-  const encoded = Buffer.from(host, "ascii");
+  socket.write(frame);
+  return { response: read(socket, 10) };
+}
+
+function domainFrame(host: string | Buffer, port = 443): Buffer {
+  const encoded = Buffer.isBuffer(host) ? host : Buffer.from(host, "ascii");
   const frame = Buffer.alloc(7 + encoded.length);
   frame.set([5, 1, 0, 3, encoded.length]);
   encoded.copy(frame, 5);
-  frame.writeUInt16BE(443, 5 + encoded.length);
-  socket.write(frame);
-  return { response: read(socket, 10) };
+  frame.writeUInt16BE(port, 5 + encoded.length);
+  return frame;
+}
+
+function beginRequest(socket: net.Socket, host: string, port = 443): Promise<{ response: Promise<Buffer> }> {
+  return beginFrame(socket, domainFrame(host, port));
 }
 
 afterEach(async () => {
@@ -70,8 +78,15 @@ describe("gateway relay", () => {
     expect(relay.relayPortForExecutable("C:\\DiscordPTB\\DiscordPTB.exe")).toBe(19061);
     expect(relay.isRoutedHost("gateway-us-east1-b.discord.gg")).toBe(true);
     expect(relay.isRoutedHost("gateway.discord.gg.")).toBe(true);
+    expect(relay.isRoutedHost("GATEWAY.DISCORD.GG")).toBe(true);
     expect(relay.isRoutedHost("stream.discord.media")).toBe(false);
     expect(relay.isRoutedHost("discord.gg.evil.example")).toBe(false);
+    expect(relay.isRoutedHost(".discord.gg")).toBe(false);
+    expect(relay.isRoutedHost("gateway..discord.gg")).toBe(false);
+    expect(relay.isRoutedHost("gateway/discord.gg")).toBe(false);
+    expect(relay.isRoutedHost("gateway .discord.gg")).toBe(false);
+    expect(relay.isRoutedHost(`${"a".repeat(64)}.discord.gg`)).toBe(false);
+    expect(relay.isRoutedHost(`${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(62)}`)).toBe(false);
   });
 
   it("holds a gateway socket until Tor is ready and rejects other destinations", async () => {
@@ -139,7 +154,7 @@ describe("gateway relay", () => {
     client.destroy();
   });
 
-  it("rejects malformed requests before opening a Tor tunnel", async () => {
+  it("rejects malformed DNS names, non-443 ports, and IP address targets before Tor authorization", async () => {
     const gateway = relay.startGatewayRelay({
       listenPort: 0,
       torPort: 9,
@@ -153,12 +168,25 @@ describe("gateway relay", () => {
     });
     servers.push(gateway.server);
     await gateway.ready;
-    const client = net.createConnection({ host: "127.0.0.1", port: (gateway.server.address() as net.AddressInfo).port });
-    client.write(Buffer.from([5, 1, 0]));
-    expect(await read(client, 2)).toEqual(Buffer.from([5, 0]));
-    client.write(Buffer.from([5, 1, 1, 9]));
-    expect((await read(client, 10))[1]).toBe(2);
-    client.destroy();
+    const relayPort = (gateway.server.address() as net.AddressInfo).port;
+    const invalidFrames = [
+      domainFrame(".discord.gg"),
+      domainFrame("gateway..discord.gg"),
+      domainFrame("gateway/discord.gg"),
+      domainFrame("gateway .discord.gg"),
+      domainFrame(`${"a".repeat(64)}.discord.gg`),
+      domainFrame(`${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(62)}`),
+      domainFrame(Buffer.concat([Buffer.from([0xff]), Buffer.from(".discord.gg", "ascii")])),
+      domainFrame("gateway.discord.gg", 80),
+      Buffer.from([5, 1, 0, 1, 127, 0, 0, 1, 1, 187]),
+      Buffer.from([5, 1, 0, 4, ...Buffer.alloc(16), 1, 187]),
+      Buffer.from([5, 1, 1, 9]),
+    ];
+    for (const frame of invalidFrames) {
+      const client = net.createConnection({ host: "127.0.0.1", port: relayPort });
+      expect((await (await beginFrame(client, frame)).response)[1]).toBe(2);
+      client.destroy();
+    }
   });
 
   it("fails closed when Tor ownership changes after upstream connection", async () => {

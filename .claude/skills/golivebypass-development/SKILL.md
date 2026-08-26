@@ -3,7 +3,7 @@ name: golivebypass-development
 description: Use when changing the GoLiveBypass Safe installer, Discord injection, Tor runtime, PAC routing, packaging, or recovery tests. Not for unrelated project administration.
 user-invocable: false
 metadata:
-  updated: "2026-08-25"
+  updated: "2026-08-26"
 ---
 
 # GoLiveBypass Safe Development
@@ -16,7 +16,7 @@ metadata:
 4. Refuse existing `_app.asar`, directories at `app.asar`, and ownership markers that do not match the canonical resources path.
 5. Keep both the renamed original and a SHA-256-verified external backup before committing a loader.
 6. Journal filesystem transitions before they happen and keep recovery idempotent.
-7. Stop only processes whose `ExecutablePath` exactly matches a discovered Discord target. Restart only flavours that were running.
+7. Stop only processes whose path and creation time match a discovered Discord target. Restart only exact executables fully stopped by the operation and still absent immediately before spawn.
 8. Validate every IPC sender against the manager window and keep the renderer sandboxed with context isolation.
 9. Keep updater and publication configuration absent. Builds are local and `--publish never`.
 10. Require an exact manifest-to-file-tree match and reject absolute paths, parent segments, drive prefixes, alternate data streams, links, junction escapes, and unlisted files.
@@ -28,7 +28,8 @@ metadata:
 16. Treat Tor as ready only when the exact packaged executable owns the configured loopback listener and an authenticated TLS probe succeeds. Recheck listener ownership asynchronously before and after every upstream tunnel; never block Electron's main thread on PowerShell.
 17. Keep the private release key non-exportable in `CurrentUser\\My`. Ship only the pinned public certificate; importing the exact self-signed certificate into `CurrentUser\\Root` requires explicit Windows confirmation, and `TrustedPublisher` limits publisher trust to that signer. Ship and document an authenticated removal path.
 18. Sign release executables and the friend trust script with the pinned RSA certificate, but exclude the official `tor.exe` and verify its packaged hash against the manifest after every build.
-19. Never disable Smart App Control silently. Reject reparse points in friend artifact paths and hold read-only locks through execution. Change `VerifiedAndReputablePolicyState` from `Enforce` to `Off` only after exact typed consent, recheck the elevated state, refresh with `CiTool`, and leave `Evaluation` unchanged. Attempt and verify rollback and trust cleanup on any failed helper run, report when either cannot be confirmed, and retain trust after the helper completes successfully so repair and uninstall remain possible.
+19. Deliberately launching `Install-GoLiveBypassSafe.bat` is consent; do not add typed or manager confirmations. Reject reparse points and hold read-only artifact locks. Elevate only the fixed signed SAC supervisor, never Setup or manager. Change `VerifiedAndReputablePolicyState` only from `Enforce` to `Off`, refresh with `CiTool`, and leave `Evaluation` unchanged. Keep automatic installation compensating: confirm termination of timed-out process trees through handles whose PID and creation time both match, restore Discord, remove a manager created by the failed attempt, and accept SAC rollback only after registry readback and `CiTool --list-policies` confirm the effective state following `CiTool --refresh`. Report rollback uncertainty distinctly and retain trust only after success.
+20. Private release builds require synchronized `0.2.2` metadata, pinned npm 11.16.0, a clean worktree, and an annotated version tag at `HEAD`. Explicit dirty builds are development-only and must record that state. Reinstall the locked dependency tree with an explicit install-script allow/deny policy and dangerous overrides disabled, clean stale output, and verify signatures, embedded version, Electron fuses, complete runtime/Tor contents, unchanged source provenance through the final signing step, and the exact final artifact set without publishing.
 
 ## Runtime Layout
 
@@ -40,11 +41,14 @@ metadata:
 - `vendor/tor-manifest.json`: generated hashes for every packaged Tor file.
 - Development reads the split `runtime/` and `vendor/` trees; packaging merges them into one verified runtime.
 - `%LOCALAPPDATA%\GoLiveBypassSafe\runtime`: stable runtime copied by the manager.
+- `%LOCALAPPDATA%\GoLiveBypassSafe\.runtime-stage` and `.runtime-previous`: fixed recoverable runtime-promotion trees used only while Discord and managed Tor are stopped.
 - `%LOCALAPPDATA%\GoLiveBypassSafe\transactions`: append-only transaction journals.
 - `%LOCALAPPDATA%\GoLiveBypassSafe\backups`: external original `app.asar` copies.
 - `GoLiveBypassSafeSetup.exe`: versionless per-user NSIS installer with shortcuts and restore-before-uninstall behavior.
 - `GoLiveBypassSafePortable.exe`: versionless emergency recovery manager.
-- `Trust-GoLiveBypassSafe.ps1` and `GoLiveBypassSafe.cer`: signed friend bootstrap and public certificate. Authenticate the stable certificate hash and thumbprint out of band, import that exact certificate, and verify the script signature before bypassing execution policy.
+- `Install-GoLiveBypassSafe.bat`: fixed unelevated launcher; accepts and forwards no arguments.
+- `Trust-GoLiveBypassSafe.ps1` and `GoLiveBypassSafe.cer`: signed unprivileged controller and pinned public certificate. The build binds exact release artifact hashes into the controller.
+- `Sac-GoLiveBypassSafe.ps1`: the only elevated component; a signed SAC supervisor with a bounded authenticated rollback channel.
 
 ## Required Verification
 

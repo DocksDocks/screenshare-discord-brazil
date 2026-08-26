@@ -3,12 +3,14 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  discoverAllDiscordTargets,
   discoverDiscordTargets,
   inspectTarget,
   installTarget,
   installedRecords,
   recoverTransactions,
   uninstallAll,
+  withInstallationLock,
   type DiscordTarget,
 } from "./installation.js";
 import { restartDiscord, stopDiscord, stopManagedTor } from "./processes.js";
@@ -37,6 +39,10 @@ function currentTargets(): DiscordTarget[] {
   return discoverDiscordTargets(localAppData());
 }
 
+function normalizedPath(file: string): string {
+  return path.resolve(file).replace(/[A-Z]/g, (character) => character.toLowerCase());
+}
+
 function overview(message = ""): Record<string, unknown> {
   const targets = isWindows ? currentTargets() : [];
   return {
@@ -59,63 +65,68 @@ async function assertDirectSystemRoute(): Promise<void> {
 }
 
 async function installOrRepair(): Promise<Record<string, unknown>> {
-  if (!isWindows) throw new Error("Esta versao segura suporta somente Windows.");
-  if (!runtimeSourceReady(sourceRuntime())) {
-    throw new Error("O runtime Tor verificado nao esta empacotado. Execute npm run prepare:tor antes do build.");
-  }
-  await assertDirectSystemRoute();
-  const targets = currentTargets();
-  if (targets.length === 0) throw new Error("Nenhuma instalacao do Discord foi encontrada.");
+  return withInstallationLock(async () => {
+    if (!isWindows) throw new Error("Esta versao segura suporta somente Windows.");
+    if (!runtimeSourceReady(sourceRuntime())) {
+      throw new Error("O runtime Tor verificado nao esta empacotado. Execute npm run prepare:tor antes do build.");
+    }
+    await assertDirectSystemRoute();
+    const targets = currentTargets();
+    if (targets.length === 0) throw new Error("Nenhuma instalacao do Discord foi encontrada.");
 
-  const previouslyRunning = await stopDiscord(targets);
-  try {
-    recoverTransactions(dataRoot());
-    await stopManagedTor(dataRoot());
-    const payloadPath = prepareRuntime(sourceRuntime(), dataRoot());
-    const installed: string[] = [];
-    const refused: string[] = [];
-    for (const target of targets) {
-      const status = inspectTarget(target);
-      if (status.state === "foreign") {
-        refused.push(target.flavour);
-        continue;
+    const previouslyRunning = await stopDiscord(targets);
+    try {
+      recoverTransactions(dataRoot());
+      await stopManagedTor(dataRoot());
+      const payloadPath = prepareRuntime(sourceRuntime(), dataRoot());
+      const installed: string[] = [];
+      const refused: string[] = [];
+      for (const target of targets) {
+        const status = inspectTarget(target);
+        if (status.state === "foreign") {
+          refused.push(target.flavour);
+          continue;
+        }
+        if (status.state === "broken") {
+          throw new Error(`${target.flavour}: estado incompleto sem transacao recuperavel.`);
+        }
+        installTarget(target, dataRoot(), payloadPath);
+        installed.push(target.flavour);
       }
-      if (status.state === "broken") {
-        throw new Error(`${target.flavour}: estado incompleto sem transacao recuperavel.`);
+      if (installed.length === 0) {
+        throw new Error(`Nada foi alterado. Modificador preservado em: ${refused.join(", ")}.`);
       }
-      installTarget(target, dataRoot(), payloadPath);
-      installed.push(target.flavour);
+      const suffix = refused.length === 0 ? "" : ` Outro modificador foi preservado em: ${refused.join(", ")}.`;
+      return overview(`Pronto em ${installed.join(", ")}.${suffix}`);
+    } finally {
+      restartDiscord(previouslyRunning);
     }
-    if (installed.length === 0) {
-      throw new Error(`Nada foi alterado. Modificador preservado em: ${refused.join(", ")}.`);
-    }
-    const suffix = refused.length === 0 ? "" : ` Outro modificador foi preservado em: ${refused.join(", ")}.`;
-    return overview(`Pronto em ${installed.join(", ")}.${suffix}`);
-  } finally {
-    restartDiscord(targets, previouslyRunning);
-  }
+  });
 }
 
 async function restoreOriginalInstallations(): Promise<string[]> {
-  if (!isWindows) throw new Error("Esta versao segura suporta somente Windows.");
-  const current = currentTargets();
-  const known = installedRecords(dataRoot()).map((record) => ({
-    flavour: record.flavour,
-    version: record.version,
-    resourcesPath: record.resourcesPath,
-    executablePath: record.executablePath,
-  }));
-  const targets = [...current, ...known].filter(
-    (target, index, all) => all.findIndex((other) => other.executablePath === target.executablePath) === index,
-  );
-  const previouslyRunning = await stopDiscord(targets);
-  try {
-    recoverTransactions(dataRoot());
-    await stopManagedTor(dataRoot());
-    return uninstallAll(dataRoot(), current);
-  } finally {
-    restartDiscord(current, previouslyRunning);
-  }
+  return withInstallationLock(async () => {
+    if (!isWindows) throw new Error("Esta versao segura suporta somente Windows.");
+    const discovered = discoverAllDiscordTargets(localAppData());
+    const known = installedRecords(dataRoot()).map((record) => ({
+      flavour: record.flavour,
+      version: record.version,
+      resourcesPath: record.resourcesPath,
+      executablePath: record.executablePath,
+    }));
+    const targets = [...discovered, ...known].filter(
+      (target, index, all) =>
+        all.findIndex((other) => normalizedPath(other.executablePath) === normalizedPath(target.executablePath)) === index,
+    );
+    const previouslyRunning = await stopDiscord(targets);
+    try {
+      recoverTransactions(dataRoot());
+      await stopManagedTor(dataRoot());
+      return uninstallAll(dataRoot(), discovered);
+    } finally {
+      restartDiscord(previouslyRunning);
+    }
+  });
 }
 
 async function uninstall(): Promise<Record<string, unknown>> {
@@ -177,15 +188,37 @@ function createWindow(): void {
   });
 }
 
-if (process.argv.includes("--restore-before-uninstall")) {
-  app.whenReady().then(async () => {
-    try {
-      await restoreOriginalInstallations();
-      app.exit(0);
-    } catch {
-      app.exit(1);
-    }
-  });
+function writeCommandResult(descriptor: 1 | 2, message: string): void {
+  try {
+    fs.writeSync(descriptor, `${message}\n`);
+  } catch {
+    // Packaged GUI executables may not inherit a console.
+  }
+}
+
+async function runCommand(operation: () => Promise<unknown>, successMessage: string): Promise<void> {
+  try {
+    await app.whenReady();
+    await operation();
+    writeCommandResult(1, successMessage);
+    app.exit(0);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "unknown_error";
+    writeCommandResult(2, `GOLIVE_COMMAND_ERROR ${detail}`);
+    app.exit(1);
+  }
+}
+
+const restoreMode = process.argv.includes("--restore-before-uninstall");
+const installMode = process.argv.includes("--install-and-exit");
+
+if (restoreMode && installMode) {
+  writeCommandResult(2, "GOLIVE_COMMAND_ERROR conflicting_modes");
+  app.exit(2);
+} else if (restoreMode) {
+  void runCommand(restoreOriginalInstallations, "GOLIVE_RESTORE_OK");
+} else if (installMode) {
+  void runCommand(installOrRepair, "GOLIVE_INSTALL_OK");
 } else if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
