@@ -32,6 +32,8 @@ $stream = $null
 $reader = $null
 $writer = $null
 $selfLock = $null
+$cleanupMutex = $null
+$cleanupMutexOwned = $false
 $changed = $false
 $priorState = $null
 $committed = $false
@@ -141,6 +143,27 @@ function Read-ProtocolLine([IO.StreamReader]$Reader) {
   throw "protocol_line_too_long"
 }
 
+function Enter-CleanupMutex {
+  if ($null -eq $script:cleanupMutex) {
+    throw "cleanup_mutex_missing"
+  }
+  if ($script:cleanupMutexOwned) {
+    return
+  }
+  try {
+    [void]$script:cleanupMutex.WaitOne()
+  } catch [Threading.AbandonedMutexException] {
+  }
+  $script:cleanupMutexOwned = $true
+}
+
+function Exit-CleanupMutex {
+  if ($script:cleanupMutexOwned) {
+    $script:cleanupMutex.ReleaseMutex()
+    $script:cleanupMutexOwned = $false
+  }
+}
+
 function Close-HelperResources {
   foreach ($resource in @($writer, $reader, $stream)) {
     if ($null -ne $resource) {
@@ -162,6 +185,13 @@ function Close-HelperResources {
     } catch {
     }
   }
+  if ($null -ne $cleanupMutex) {
+    try {
+      Exit-CleanupMutex
+    } catch {
+    }
+    $cleanupMutex.Dispose()
+  }
 }
 
 try {
@@ -178,6 +208,10 @@ try {
   $principal = New-Object Security.Principal.WindowsPrincipal($identity)
   if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw "helper_not_elevated"
+  }
+
+  if ($ExpectedState -eq "1") {
+    $cleanupMutex = [Threading.Mutex]::new($false, "Local\GoLiveBypassSafeCleanup-$Token")
   }
 
   $client = New-Object Net.Sockets.TcpClient([Net.Sockets.AddressFamily]::InterNetwork)
@@ -219,20 +253,67 @@ try {
   if ($command -cne "COMMIT $Token") {
     throw "commit_invalid"
   }
-  $successfulState = if ($priorState -eq "1") { "0" } else { $priorState }
-  $successfulEffectiveState = if ($successfulState -eq "missing") { "0" } else { $successfulState }
-  if ((Get-SacState) -cne $successfulState -or (Get-EffectiveSacState) -cne $successfulEffectiveState) {
-    throw "successful_state_unconfirmed"
+  if ($changed) {
+    $successRestoreFailed = $false
+    Enter-CleanupMutex
+    try {
+      try {
+        Set-SacState 1
+        Invoke-CiRefresh
+        if ((Get-SacState) -cne $priorState -or (Get-EffectiveSacState) -cne "1") {
+          throw "sac_success_restore_unconfirmed"
+        }
+      } catch {
+        $successRestoreFailed = $true
+        try {
+          Set-SacState 0
+          Invoke-CiRefresh
+          if ((Get-SacState) -cne "0" -or (Get-EffectiveSacState) -cne "0") {
+            throw "sac_commit_rollback_state_unconfirmed"
+          }
+        } catch {
+          throw "sac_success_restore_unconfirmed"
+        }
+      }
+    } finally {
+      Exit-CleanupMutex
+    }
+    if ($successRestoreFailed) {
+      $writer.WriteLine("ROLLBACK_READY $Token")
+      if ((Read-ProtocolLine $reader) -cne "ABORT $Token") {
+        throw "commit_rollback_command_invalid"
+      }
+      throw "sac_success_restore_failed"
+    }
+  } else {
+    Invoke-CiRefresh
   }
-  $writer.WriteLine("COMMITTED $Token")
+  $successfulEffectiveState = if ($priorState -eq "missing") { "0" } else { $priorState }
+  if ((Get-SacState) -cne $priorState -or (Get-EffectiveSacState) -cne $successfulEffectiveState) {
+    throw "sac_success_restore_unconfirmed"
+  }
   $committed = $true
+  try {
+    $writer.WriteLine("COMMITTED $Token")
+  } catch {
+  }
 } catch {
   $rollbackConfirmed = $true
-  if ($changed -and -not $committed) {
+  if ($null -ne $priorState -and -not $committed) {
     try {
-      Set-SacState 1
-      Invoke-CiRefresh
-      if ((Get-SacState) -cne $priorState -or (Get-EffectiveSacState) -cne "1") {
+      if ($changed) {
+        Enter-CleanupMutex
+        try {
+          Set-SacState 1
+          Invoke-CiRefresh
+        } finally {
+          Exit-CleanupMutex
+        }
+      } else {
+        Invoke-CiRefresh
+      }
+      $rollbackEffectiveState = if ($priorState -eq "missing") { "0" } else { $priorState }
+      if ((Get-SacState) -cne $priorState -or (Get-EffectiveSacState) -cne $rollbackEffectiveState) {
         $rollbackConfirmed = $false
       }
     } catch {

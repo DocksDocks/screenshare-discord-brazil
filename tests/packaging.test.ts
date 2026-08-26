@@ -1,4 +1,7 @@
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -10,7 +13,7 @@ describe("Windows packaging", () => {
     const packageJson = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf8"));
     const packageLock = JSON.parse(fs.readFileSync(path.join(projectRoot, "package-lock.json"), "utf8"));
 
-    expect(packageJson.version).toBe("0.2.2");
+    expect(packageJson.version).toBe("0.2.3");
     expect(packageLock.version).toBe(packageJson.version);
     expect(packageLock.packages[""].version).toBe(packageJson.version);
     expect(packageJson.packageManager).toBe("npm@11.16.0");
@@ -28,7 +31,7 @@ describe("Windows packaging", () => {
     expect(build).toContain("[switch]$AllowDirty");
     expect(build).toContain("status --porcelain=v1 --untracked-files=all");
     expect(build).toContain("cat-file -t $tagName");
-    expect(build).toContain('$package.version -ne "0.2.2"');
+    expect(build).toContain('$package.version -ne "0.2.3"');
     expect(build).toContain("npm.cmd ci");
     expect(build).toContain("--dangerously-allow-all-scripts=false");
     expect(build).toContain("npm.cmd run verify");
@@ -39,7 +42,51 @@ describe("Windows packaging", () => {
     expect(build).toContain("RunAsNode is Disabled");
     expect(build).toContain("The packaged Tor file tree no longer matches the manifest");
     expect(build).toContain('"state=$sourceState"');
+    expect(build).toContain('$bundleName = "GoLiveBypassSafe-v$($package.version).zip"');
+    expect(build).toContain('create-release-bundle.ps1") -ReleaseDirectory $releaseDirectory');
+    expect(build).toContain("The release bundle was not created at the expected path");
   });
+
+  it("creates the same verified one-download bundle from the same files", () => {
+    const releaseDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "golive-release-bundle-"));
+    const script = path.join(projectRoot, "scripts", "create-release-bundle.ps1");
+    const names = [
+      "GoLiveBypassSafe.cer",
+      "GoLiveBypassSafePortable.exe",
+      "GoLiveBypassSafeSetup.exe",
+      "Install-GoLiveBypassSafe.bat",
+      "Sac-GoLiveBypassSafe.ps1",
+      "SHA256SUMS.txt",
+      "SOURCE.txt",
+      "Trust-GoLiveBypassSafe.ps1",
+    ];
+    const bundle = path.join(releaseDirectory, "GoLiveBypassSafe-v0.2.3.zip");
+    const runBundle = () =>
+      spawnSync(
+        "powershell.exe",
+        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-ReleaseDirectory", releaseDirectory, "-Version", "0.2.3"],
+        { encoding: "utf8", windowsHide: true },
+      );
+    const hash = () => createHash("sha256").update(fs.readFileSync(bundle)).digest("hex");
+
+    try {
+      for (const name of names) fs.writeFileSync(path.join(releaseDirectory, name), `fixture:${name}\n`);
+      const first = runBundle();
+      expect(first.stderr).toBe("");
+      expect(first.status).toBe(0);
+      const firstHash = hash();
+
+      fs.rmSync(bundle);
+      const changedTime = new Date("2026-08-26T12:00:00Z");
+      for (const name of names) fs.utimesSync(path.join(releaseDirectory, name), changedTime, changedTime);
+      const second = runBundle();
+      expect(second.stderr).toBe("");
+      expect(second.status).toBe(0);
+      expect(hash()).toBe(firstHash);
+    } finally {
+      fs.rmSync(releaseDirectory, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it("restores Discord only during a normal manager uninstall", () => {
     const installer = fs.readFileSync(path.join(projectRoot, "build", "installer.nsh"), "utf8");

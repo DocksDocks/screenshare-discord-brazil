@@ -101,6 +101,27 @@ function Read-ProtocolLine([IO.StreamReader]$Reader) {
   throw "protocol_line_too_long"
 }
 
+function Enter-CleanupMutex {
+  if ($null -eq $script:cleanupMutex) {
+    throw "cleanup_mutex_missing"
+  }
+  if ($script:cleanupMutexOwned) {
+    return
+  }
+  try {
+    [void]$script:cleanupMutex.WaitOne()
+  } catch [Threading.AbandonedMutexException] {
+  }
+  $script:cleanupMutexOwned = $true
+}
+
+function Exit-CleanupMutex {
+  if ($script:cleanupMutexOwned) {
+    $script:cleanupMutex.ReleaseMutex()
+    $script:cleanupMutexOwned = $false
+  }
+}
+
 function Get-ProcessCreationTime([object]$Candidate) {
   return ([DateTimeOffset]$Candidate.CreationDate).ToUnixTimeMilliseconds()
 }
@@ -233,6 +254,8 @@ $reader = $null
 $writer = $null
 $helperProcess = $null
 $helperCreationTime = $null
+$cleanupMutex = $null
+$cleanupMutexOwned = $false
 $priorSacState = $null
 $stage = "startup"
 $successRecord = $null
@@ -240,6 +263,7 @@ $failure = $null
 $failureStage = $null
 $trustRemovalUnconfirmed = $false
 $applicationRollbackConfirmed = $true
+$applicationRollbackSafe = $true
 $sacRollbackAcknowledged = $false
 $helperCouldChangeSac = $false
 $setupStarted = $false
@@ -375,6 +399,17 @@ try {
       $random.Dispose()
     }
     $token = ([BitConverter]::ToString($tokenBytes)).Replace("-", "")
+    if ($priorSacState -eq "1") {
+      $cleanupMutexCreated = $false
+      $cleanupMutexName = "Local\GoLiveBypassSafeCleanup-$token"
+      $cleanupMutex = [Threading.Mutex]::new($true, $cleanupMutexName, [ref]$cleanupMutexCreated)
+      if (-not $cleanupMutexCreated) {
+        $cleanupMutex.Dispose()
+        $cleanupMutex = $null
+        throw "cleanup_mutex_already_exists"
+      }
+      $cleanupMutexOwned = $true
+    }
     $systemPowerShell = Join-Path ([Environment]::SystemDirectory) "WindowsPowerShell\v1.0\powershell.exe"
     $helperArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Port {1} -Token {2} -ExpectedState {3} -TimeoutSeconds {4}' -f $helperPath, $port, $token, $priorSacState, $helperTimeoutSeconds
     $helperProcess = Start-Process -FilePath $systemPowerShell -Verb RunAs -ArgumentList $helperArguments -PassThru
@@ -412,9 +447,22 @@ try {
     Invoke-BoundedProcess $portablePath "--install-and-exit" $applicationTimeoutSeconds
 
     $stage = "commit"
+    $applicationRollbackSafe = $priorSacState -ne "1"
+    Exit-CleanupMutex
     $writer.WriteLine("COMMIT $token")
-    if ((Read-ProtocolLine $reader) -cne "COMMITTED $token") {
-      throw "helper_commit_invalid"
+    try {
+      $commitResponse = Read-ProtocolLine $reader
+    } catch {
+      $commitResponse = $null
+    }
+    if ($commitResponse -ceq "ROLLBACK_READY $token") {
+      Enter-CleanupMutex
+      $applicationRollbackSafe = $true
+      throw "helper_commit_restore_failed"
+    }
+    if ($commitResponse -ceq "ROLLED_BACK $token") {
+      $sacRollbackAcknowledged = $true
+      throw "helper_commit_rolled_back"
     }
     if (-not $helperProcess.WaitForExit(30000)) {
       throw "helper_exit_timeout"
@@ -427,15 +475,17 @@ try {
 } catch {
   $failure = $_
   $failureStage = $stage
-  if ($portableStarted) {
+  if ($portableStarted -and $applicationRollbackSafe) {
     try {
       $stage = "application_restore"
       Invoke-BoundedProcess $portablePath "--restore-before-uninstall" $cleanupTimeoutSeconds
     } catch {
       $applicationRollbackConfirmed = $false
     }
+  } elseif ($portableStarted) {
+    $applicationRollbackConfirmed = $false
   }
-  if ($setupStarted -and -not $managerInitiallyInstalled) {
+  if ($setupStarted -and -not $managerInitiallyInstalled -and $applicationRollbackSafe) {
     try {
       $stage = "manager_cleanup"
       if (Test-Path -LiteralPath $installedUninstallerPath) {
@@ -449,8 +499,14 @@ try {
     } catch {
       $applicationRollbackConfirmed = $false
     }
+  } elseif ($setupStarted -and -not $managerInitiallyInstalled) {
+    $applicationRollbackConfirmed = $false
   }
-  if ($helperCouldChangeSac -and $null -ne $writer -and $null -ne $reader) {
+  try {
+    Exit-CleanupMutex
+  } catch {
+  }
+  if (-not $cleanupMutexOwned -and $helperCouldChangeSac -and -not $sacRollbackAcknowledged -and $null -ne $writer -and $null -ne $reader) {
     try {
       $stage = "sac_abort"
       $writer.WriteLine("ABORT $token")
@@ -460,6 +516,13 @@ try {
     }
   }
 } finally {
+  if ($null -ne $cleanupMutex) {
+    try {
+      Exit-CleanupMutex
+    } catch {
+    }
+    $cleanupMutex.Dispose()
+  }
   if ($null -ne $writer) {
     try {
       $writer.Dispose()

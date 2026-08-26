@@ -10,8 +10,8 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $package = Get-Content -LiteralPath (Join-Path $repositoryRoot "package.json") -Raw | ConvertFrom-Json
 $packageLockPath = Join-Path $repositoryRoot "package-lock.json"
 $lockVersions = @(& node.exe -e "const fs=require('fs');const lock=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));console.log(lock.version);console.log(lock.packages[''].version);" $packageLockPath)
-if ($LASTEXITCODE -ne 0 -or $lockVersions.Count -ne 2 -or $package.version -ne "0.2.2" -or $lockVersions[0] -ne $package.version -or $lockVersions[1] -ne $package.version) {
-  throw "package.json and package-lock.json must identify release 0.2.2."
+if ($LASTEXITCODE -ne 0 -or $lockVersions.Count -ne 2 -or $package.version -ne "0.2.3" -or $lockVersions[0] -ne $package.version -or $lockVersions[1] -ne $package.version) {
+  throw "package.json and package-lock.json must identify release 0.2.3."
 }
 $expectedNpmVersion = ([string]$package.packageManager).Replace("npm@", "")
 $actualNpmVersion = (& npm.cmd --version).Trim()
@@ -193,12 +193,19 @@ $assets = @($setup, $portable, $trustScript, $sacHelper, $batchInstaller, $relea
 $checksums = $assets | ForEach-Object {
   "{0}  {1}" -f (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash, (Split-Path -Leaf $_)
 }
-[System.IO.File]::WriteAllLines((Join-Path $releaseDirectory "SHA256SUMS.txt"), $checksums, [System.Text.Encoding]::ASCII)
+$checksumPath = Join-Path $releaseDirectory "SHA256SUMS.txt"
+[System.IO.File]::WriteAllLines($checksumPath, $checksums, [System.Text.Encoding]::ASCII)
 Remove-Item -LiteralPath (Join-Path $releaseDirectory "win-unpacked") -Recurse -Force
 foreach ($generated in @(".cache", "builder-debug.yml", "latest.yml", "GoLiveBypassSafeSetup.exe.blockmap")) {
   Remove-Item -LiteralPath (Join-Path $releaseDirectory $generated) -Recurse -Force -ErrorAction SilentlyContinue
 }
-$expectedNames = @($assets | ForEach-Object { Split-Path -Leaf $_ }) + "SHA256SUMS.txt"
+$bundleName = "GoLiveBypassSafe-v$($package.version).zip"
+$bundlePath = & (Join-Path $PSScriptRoot "create-release-bundle.ps1") -ReleaseDirectory $releaseDirectory -Version ([string]$package.version)
+if ($bundlePath -ne (Join-Path $releaseDirectory $bundleName)) {
+  throw "The release bundle was not created at the expected path."
+}
+
+$expectedNames = @($assets | ForEach-Object { Split-Path -Leaf $_ }) + @("SHA256SUMS.txt", $bundleName)
 $actualNames = @(Get-ChildItem -LiteralPath $releaseDirectory -Force | ForEach-Object { $_.Name })
 if (@(Compare-Object $expectedNames $actualNames).Count -ne 0) {
   throw "The release directory contains an unexpected artifact set."

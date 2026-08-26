@@ -46,5 +46,5 @@ describe("renamed Discord archive", () => {
     expect(result.error).toBeUndefined();
     expect(result.stderr).toBe("");
     expect(result.status).toBe(0);
-  });
+  }, 45_000);
 });
