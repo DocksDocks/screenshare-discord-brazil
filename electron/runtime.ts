@@ -21,7 +21,7 @@ interface RuntimeLayout {
 
 const PACKAGED_RUNTIME_SHA256 = {
   "gateway-relay.cjs": "8519c0a763e9d88b79fd073fdcaf77d931e75af5bb26ac6aa530fff8c2574d3e",
-  "payload.cjs": "e2b62597b2c45d00318f9c248fe2c38e7f2767fbf30080e94974fceb1cc6f7f5",
+  "payload.cjs": "3531f6924da4698d9f6827d19d31117158b7c36b2eb1377785f07819ebd7cfc1",
   "proxy.pac": "ef392cc5619a91e4ff412b2ab0fdca5252dc8a78c899876986d71828b44fc50f",
   "runtime-safety.cjs": "8071de16675ff07848cb1f24380b8297d058f87a6e9b05ea23238bf941018186",
   "tor-manifest.json": "498db398b840eb241cbcad35fcb2960f5b229a9a6687f4cc3dacaf9f09567343",

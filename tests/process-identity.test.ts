@@ -52,6 +52,9 @@ describe("process identity revalidation", () => {
     expect(terminationScript).toContain(
       "FullyQualifiedErrorId -ceq 'NoProcessFoundForGivenId,Microsoft.PowerShell.Commands.GetProcessCommand'",
     );
+    expect(terminationScript).toContain("$parsedSpecs = ConvertFrom-Json -InputObject $env:GOLIVE_PROCESS_SPECS");
+    expect(terminationScript).toContain("$specs = @($parsedSpecs)");
+    expect(terminationScript).not.toContain("@($env:GOLIVE_PROCESS_SPECS | ConvertFrom-Json)");
     expect(terminationScript).not.toContain("[Microsoft.PowerShell.Commands.ProcessCommandException]");
   });
 

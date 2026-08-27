@@ -14,7 +14,7 @@ describe("Windows packaging", () => {
     const packageJson = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf8"));
     const packageLock = JSON.parse(fs.readFileSync(path.join(projectRoot, "package-lock.json"), "utf8"));
 
-    expect(packageJson.version).toBe("0.2.5");
+    expect(packageJson.version).toBe("0.2.6");
     expect(packageLock.version).toBe(packageJson.version);
     expect(packageLock.packages[""].version).toBe(packageJson.version);
     expect(packageJson.packageManager).toBe("npm@11.16.0");
@@ -37,7 +37,7 @@ describe("Windows packaging", () => {
     expect(build).toContain("[switch]$AllowDirty");
     expect(build).toContain("status --porcelain=v1 --untracked-files=all");
     expect(build).toContain("cat-file -t $tagName");
-    expect(build).toContain('$package.version -ne "0.2.5"');
+    expect(build).toContain('$package.version -ne "0.2.6"');
     expect(build).toContain("npm.cmd ci");
     expect(build).toContain("--dangerously-allow-all-scripts=false");
     expect(build).toContain("npm.cmd run verify");
@@ -91,11 +91,11 @@ describe("Windows packaging", () => {
       "SHA256SUMS.txt",
       "SOURCE.txt",
     ];
-    const bundle = path.join(releaseDirectory, "GoLiveBypassSafe-v0.2.5.zip");
+    const bundle = path.join(releaseDirectory, "GoLiveBypassSafe-v0.2.6.zip");
     const runBundle = () =>
       spawnSync(
         "powershell.exe",
-        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-ReleaseDirectory", releaseDirectory, "-Version", "0.2.5"],
+        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-ReleaseDirectory", releaseDirectory, "-Version", "0.2.6"],
         { encoding: "utf8", windowsHide: true },
       );
     const hash = () => createHash("sha256").update(fs.readFileSync(bundle)).digest("hex");

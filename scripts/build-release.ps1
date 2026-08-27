@@ -54,8 +54,8 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $package = Get-Content -LiteralPath (Join-Path $repositoryRoot "package.json") -Raw | ConvertFrom-Json
 $packageLockPath = Join-Path $repositoryRoot "package-lock.json"
 $lockVersions = @(& node.exe -e "const fs=require('fs');const lock=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));console.log(lock.version);console.log(lock.packages[''].version);" $packageLockPath)
-if ($LASTEXITCODE -ne 0 -or $lockVersions.Count -ne 2 -or $package.version -ne "0.2.5" -or $lockVersions[0] -ne $package.version -or $lockVersions[1] -ne $package.version) {
-  throw "package.json and package-lock.json must identify release 0.2.5."
+if ($LASTEXITCODE -ne 0 -or $lockVersions.Count -ne 2 -or $package.version -ne "0.2.6" -or $lockVersions[0] -ne $package.version -or $lockVersions[1] -ne $package.version) {
+  throw "package.json and package-lock.json must identify release 0.2.6."
 }
 if ($package.build.win.signExecutable -ne $false) {
   throw "The release must disable Windows executable signing explicitly."

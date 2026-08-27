@@ -202,9 +202,6 @@ const originalIsReady = app.isReady;
 const electronWhenReady = originalWhenReady.bind(app);
 const electronIsReady = originalIsReady.bind(app);
 let electronReadyArguments = [];
-app.once("ready", (...args) => {
-  electronReadyArguments = args;
-});
 const electronReady = electronWhenReady();
 
 async function blockAllTraffic() {
@@ -257,30 +254,45 @@ const startupReady = verifyStartupRoute().catch(async (error) => {
 void startupReady.catch(() => undefined);
 
 function holdDiscordReady(ready, load) {
-  const initialReadyListeners = new Set(app.rawListeners("ready"));
+  let releaseDiscordReady;
+  let rejectDiscordReady;
+  const discordReady = new Promise((resolve, reject) => {
+    releaseDiscordReady = resolve;
+    rejectDiscordReady = reject;
+  });
+  void discordReady.catch(() => undefined);
 
-  app.whenReady = () => ready;
-  app.isReady = () => false;
+  const originalEmit = app.emit;
+  let holdReadyEvent = true;
+  const gatedIsReady = () => !holdReadyEvent && electronIsReady();
+  const gatedEmit = function (event, ...args) {
+    if (event !== "ready" || !holdReadyEvent) return Reflect.apply(originalEmit, this, [event, ...args]);
+    electronReadyArguments = args;
+    return app.listenerCount("ready") > 0;
+  };
+  app.emit = gatedEmit;
+  app.whenReady = () => discordReady;
+  app.isReady = gatedIsReady;
+
+  try {
+    load();
+  } catch (error) {
+    rejectDiscordReady(error);
+    return Promise.reject(error);
+  }
 
   return ready.then(
     () => {
-      load();
-      const listeners = app.rawListeners("ready").filter((listener) => !initialReadyListeners.has(listener));
-      for (const listener of listeners) {
-        app.removeListener("ready", listener);
-      }
-      app.whenReady = originalWhenReady;
+      holdReadyEvent = false;
+      if (app.emit === gatedEmit) app.emit = originalEmit;
       app.isReady = originalIsReady;
-      for (const listener of listeners) {
-        try {
-          Reflect.apply(listener, app, electronReadyArguments);
-        } catch (error) {
-          process.nextTick(() => {
-            throw error;
-          });
-          break;
-        }
-      }
+      releaseDiscordReady();
+      app.whenReady = originalWhenReady;
+      app.emit("ready", ...electronReadyArguments);
+    },
+    (error) => {
+      rejectDiscordReady(error);
+      throw error;
     },
   );
 }

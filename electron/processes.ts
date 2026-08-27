@@ -119,7 +119,8 @@ function terminateExactProcesses(
   }));
   const script = [
     "$ErrorActionPreference = 'Stop'",
-    "$specs = @($env:GOLIVE_PROCESS_SPECS | ConvertFrom-Json)",
+    "$parsedSpecs = ConvertFrom-Json -InputObject $env:GOLIVE_PROCESS_SPECS",
+    "$specs = @($parsedSpecs)",
     "$opened = @()",
     "foreach ($spec in $specs) {",
     "  try { $candidate = Get-Process -Id ([int]$spec.ProcessId) -ErrorAction Stop; $null = $candidate.Handle } catch { if ($_.FullyQualifiedErrorId -ceq 'NoProcessFoundForGivenId,Microsoft.PowerShell.Commands.GetProcessCommand') { continue }; [pscustomobject]@{ Status = 'error'; Killed = @() } | ConvertTo-Json -Compress; exit 0 }",

@@ -4,7 +4,7 @@ Fork Windows-only e Tor-only inspirado no [GoLiveBypass](https://github.com/bezu
 
 ## Instalacao rapida
 
-1. Abra a pagina de [Releases](https://github.com/DocksDocks/screenshare-discord-brazil/releases) e baixe `GoLiveBypassSafe-v0.2.5.zip`.
+1. Abra a pagina de [Releases](https://github.com/DocksDocks/screenshare-discord-brazil/releases) e baixe `GoLiveBypassSafe-v0.2.6.zip`.
 2. Compare o SHA-256 exibido pelo GitHub e extraia todo o ZIP para uma pasta.
 3. Em **Seguranca do Windows > Controle de aplicativos e navegador > Smart App Control**, selecione **Desativado**.
 4. Se uma versao anterior estiver instalada, abra o manager, restaure o Discord e desinstale essa versao antes de continuar.
@@ -30,7 +30,7 @@ Executar o BAT deliberadamente constitui consentimento para o fluxo. O controlle
 - Nao possui auto-updater, bootstrap remoto ou execucao de codigo vindo de `main`.
 - Rejeita caminhos absolutos, junctions, links, arquivos nao listados ou entradas que escapem do runtime do Tor.
 - Confia em um PID salvo somente quando o executavel correspondente ainda e o `tor.exe` empacotado e possui o listener SOCKS de loopback.
-- Carrega o modulo original do Discord somente depois de obter a porta exclusiva do relay; cada tunel revalida o processo e o listener Tor antes e depois da conexao.
+- Carrega o bootstrap original do Discord sincronicamente depois de obter a porta exclusiva do relay, preservando APIs que precisam rodar antes de `ready`, mas so libera seus callbacks de inicializacao depois de autenticar Tor e a rota Chromium. Cada tunel revalida o processo e o listener Tor antes e depois da conexao.
 - Nao precisa manter o gerenciador aberto: o runtime local inicia com o Discord depois da primeira instalacao.
 
 ## Limites
@@ -68,7 +68,7 @@ O hash corresponde ao `sha256sums-unsigned-build.txt` publicado pelo Tor Project
 
 ## Release
 
-O build publica somente `release/GoLiveBypassSafe-v0.2.5.zip`, contendo:
+O build publica somente `release/GoLiveBypassSafe-v0.2.6.zip`, contendo:
 
 - `GoLiveBypassSafeSetup.exe`: instalador NSIS por usuario.
 - `Install-GoLiveBypassSafe.bat`: launcher sem elevacao.
@@ -102,7 +102,7 @@ O log `runtime.log` contem somente horario e codigos de estado como `tor_started
 
 ## Certificado antigo
 
-A `v0.2.5` nao usa nem instala certificados. Quem executou a `v0.2.4` pode remover a confianca antiga pelo thumbprint exato:
+A `v0.2.6` nao usa nem instala certificados. Quem executou a `v0.2.4` pode remover a confianca antiga pelo thumbprint exato:
 
 ```powershell
 $thumb = "4960FAD2932D56589F1DADFF3CBEE143FAA9EB35"

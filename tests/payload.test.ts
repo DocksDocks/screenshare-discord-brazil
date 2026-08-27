@@ -31,12 +31,11 @@ function installReadyGate(app: TestApp, ready: Promise<void>, nativeReady: () =>
   vm.runInNewContext(`${readyGateSource}\nvoid holdDiscordReady(ready, load).catch(() => undefined);`, {
     app,
     electronIsReady: nativeReady,
-    electronReadyArguments: ["native-ready"],
     originalIsReady: app.isReady,
     originalWhenReady: app.whenReady,
     load,
-    process: { nextTick: process.nextTick.bind(process) },
     ready,
+    electronReadyArguments: [],
   });
 }
 
@@ -139,14 +138,15 @@ describe("Discord payload startup", () => {
     ]);
   });
 
-  it("does not load Discord until the relay, Tor, and exact Chromium route are authenticated", () => {
+  it("loads Discord before native ready but holds its startup until the route is authenticated", () => {
     expect(source.indexOf("startGatewayRelay({")).toBeGreaterThan(0);
     expect(source.indexOf("startGatewayRelay({")).toBeLessThan(source.indexOf("const discordPackage = require("));
     expect(source).toContain("await Promise.all([electronReady, gatewayRelay.ready])");
     expect(source).toContain("holdDiscordReady(startupReady, loadDiscord)");
     expect(source).not.toContain("loadDiscord();");
-    expect(source).toContain("app.whenReady = () => ready");
-    expect(source).toContain("app.isReady = () => false");
+    expect(source.indexOf("load();")).toBeLessThan(source.indexOf("return ready.then("));
+    expect(source).toContain("app.whenReady = () => discordReady");
+    expect(source).toContain("app.isReady = gatedIsReady");
   });
 
   it("loads and replays even prototype-registered readiness only after startup succeeds", async () => {
@@ -159,18 +159,39 @@ describe("Discord payload startup", () => {
     const calls: string[] = [];
     installReadyGate(app, startup.promise, () => nativeReady, () => {
       calls.push("load");
+      expect(nativeReady).toBe(false);
       EventEmitter.prototype.on.call(app, "ready", (argument) => calls.push(`prototype:${argument}`));
     });
+    expect(calls).toEqual(["load"]);
 
     nativeReady = true;
     app.emit("ready", "unguarded-native-ready");
     await Promise.resolve();
+    expect(calls).toEqual(["load"]);
+
+    startup.resolve();
+    await startup.promise;
+    await Promise.resolve();
+    expect(calls).toEqual(["load", "prototype:unguarded-native-ready"]);
+  });
+
+  it("blocks a ready emission triggered synchronously while Discord loads", async () => {
+    const startup = deferred();
+    const app = Object.assign(new EventEmitter(), {
+      isReady: () => false,
+      whenReady: () => Promise.resolve(),
+    }) as TestApp;
+    const calls: string[] = [];
+    installReadyGate(app, startup.promise, () => true, () => {
+      app.on("ready", (argument) => calls.push(argument));
+      app.emit("ready", "sync-ready");
+    });
     expect(calls).toEqual([]);
 
     startup.resolve();
     await startup.promise;
     await Promise.resolve();
-    expect(calls).toEqual(["load", "prototype:native-ready"]);
+    expect(calls).toEqual(["sync-ready"]);
   });
 
   it("releases deferred readiness listeners only after startup succeeds", async () => {
@@ -188,7 +209,10 @@ describe("Discord payload startup", () => {
     installReadyGate(app, startup.promise, () => nativeReady, () => {
       app.on("ready", () => calls.push("remove-all"));
       app.removeAllListeners("ready");
-      app.on("ready", (argument) => calls.push(`on:${argument}`));
+      app.on("ready", (argument) => {
+        calls.push(`on:${argument}`);
+        void app.whenReady().then(() => calls.push("nested-promise"));
+      });
       app.prependOnceListener("ready", (argument) => calls.push(`prepend:${argument}`));
       app.once("ready", removed);
       app.off("ready", removed);
@@ -199,15 +223,172 @@ describe("Discord payload startup", () => {
     app.emit("ready", "unguarded-native-ready");
     await Promise.resolve();
     expect(app.isReady()).toBe(false);
+    const capturedIsReady = app.isReady;
     expect(calls).toEqual([]);
 
     startup.resolve();
     await startup.promise;
     await Promise.resolve();
-    expect(calls).toEqual(["prepend:native-ready", "on:native-ready", "promise"]);
+    expect(calls).toEqual([
+      "prepend:unguarded-native-ready",
+      "on:unguarded-native-ready",
+      "promise",
+      "nested-promise",
+    ]);
     expect(app.isReady()).toBe(true);
+    expect(capturedIsReady()).toBe(true);
     expect(app.whenReady).toBe(nativeWhenReady);
     expect(app.isReady).toBe(nativeIsReady);
+  });
+
+  it("holds ready listeners registered asynchronously before native ready", async () => {
+    const startup = deferred();
+    const app = Object.assign(new EventEmitter(), {
+      isReady: () => false,
+      whenReady: () => Promise.resolve(),
+    }) as TestApp;
+    const calls: string[] = [];
+    installReadyGate(app, startup.promise, () => true);
+
+    void Promise.resolve().then(() => {
+      EventEmitter.prototype.on.call(app, "ready", () => calls.push("async-ready"));
+    });
+    await Promise.resolve();
+    app.emit("ready");
+    expect(calls).toEqual([]);
+
+    startup.resolve();
+    await startup.promise;
+    await Promise.resolve();
+    expect(calls).toEqual(["async-ready"]);
+  });
+
+  it("replays ready listeners registered after native ready while authentication is pending", async () => {
+    const startup = deferred();
+    const app = Object.assign(new EventEmitter(), {
+      isReady: () => false,
+      whenReady: () => Promise.resolve(),
+    }) as TestApp;
+    const calls: string[] = [];
+    installReadyGate(app, startup.promise, () => true);
+
+    app.emit("ready");
+    EventEmitter.prototype.on.call(app, "ready", () => calls.push("late-ready"));
+    expect(calls).toEqual([]);
+
+    startup.resolve();
+    await startup.promise;
+    await Promise.resolve();
+    expect(calls).toEqual(["late-ready"]);
+  });
+
+  it("preserves duplicate registrations of the same ready listener", async () => {
+    const startup = deferred();
+    const app = Object.assign(new EventEmitter(), {
+      isReady: () => false,
+      whenReady: () => Promise.resolve(),
+    }) as TestApp;
+    let calls = 0;
+    const listener = () => {
+      calls += 1;
+    };
+    installReadyGate(app, startup.promise, () => true, () => app.on("ready", listener));
+
+    app.emit("ready");
+    app.on("ready", listener);
+    startup.resolve();
+    await startup.promise;
+    await Promise.resolve();
+
+    expect(calls).toBe(2);
+    expect(app.listenerCount("ready")).toBe(2);
+  });
+
+  it("holds a listener removed and re-added with the same identity", async () => {
+    const startup = deferred();
+    const app = Object.assign(new EventEmitter(), {
+      isReady: () => false,
+      whenReady: () => Promise.resolve(),
+    }) as TestApp;
+    let calls = 0;
+    const listener = () => {
+      calls += 1;
+    };
+    app.on("ready", listener);
+    installReadyGate(app, startup.promise, () => true, () => {
+      app.removeListener("ready", listener);
+      app.on("ready", listener);
+    });
+
+    app.emit("ready");
+    expect(calls).toBe(0);
+    startup.resolve();
+    await startup.promise;
+    await Promise.resolve();
+    expect(calls).toBe(1);
+  });
+
+  it("does not synthesize listener meta-events while ready is held", async () => {
+    const startup = deferred();
+    const app = Object.assign(new EventEmitter(), {
+      isReady: () => false,
+      whenReady: () => Promise.resolve(),
+    }) as TestApp;
+    const metaEvents: string[] = [];
+    app.on("newListener", (event) => {
+      if (event === "ready") metaEvents.push("new");
+    });
+    app.on("removeListener", (event) => {
+      if (event === "ready") metaEvents.push("remove");
+    });
+    installReadyGate(app, startup.promise, () => true, () => app.on("ready", () => undefined));
+    expect(metaEvents).toEqual(["new"]);
+
+    app.emit("ready");
+    startup.resolve();
+    await startup.promise;
+    await Promise.resolve();
+    expect(metaEvents).toEqual(["new"]);
+  });
+
+  it("honors ready listener removal while authentication is pending", async () => {
+    const startup = deferred();
+    const app = Object.assign(new EventEmitter(), {
+      isReady: () => false,
+      whenReady: () => Promise.resolve(),
+    }) as TestApp;
+    let calls = 0;
+    const listener = () => {
+      calls += 1;
+    };
+    installReadyGate(app, startup.promise, () => true, () => app.on("ready", listener));
+
+    app.emit("ready");
+    app.removeListener("ready", listener);
+    startup.resolve();
+    await startup.promise;
+    await Promise.resolve();
+
+    expect(calls).toBe(0);
+    expect(app.listenerCount("ready")).toBe(0);
+  });
+
+  it("honors ready listener prepending while authentication is pending", async () => {
+    const startup = deferred();
+    const app = Object.assign(new EventEmitter(), {
+      isReady: () => false,
+      whenReady: () => Promise.resolve(),
+    }) as TestApp;
+    const calls: string[] = [];
+    installReadyGate(app, startup.promise, () => true, () => app.on("ready", () => calls.push("early")));
+
+    app.emit("ready");
+    app.prependListener("ready", () => calls.push("prepended"));
+    startup.resolve();
+    await startup.promise;
+    await Promise.resolve();
+
+    expect(calls).toEqual(["prepended", "early"]);
   });
 
   it("keeps Discord readiness blocked when startup fails", async () => {
@@ -231,7 +412,7 @@ describe("Discord payload startup", () => {
     await Promise.resolve();
 
     expect(app.isReady()).toBe(false);
-    expect(loaded).toBe(false);
+    expect(loaded).toBe(true);
     expect(readyListenerCalled).toBe(false);
   });
 
